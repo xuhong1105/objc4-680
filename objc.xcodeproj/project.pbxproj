@@ -408,7 +408,7 @@
 		9F64259C1D71F2C100D117F6 /* vproc_priv.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = vproc_priv.h; sourceTree = "<group>"; };
 		9F6425D41D71F2FB00D117F6 /* lock_private.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = lock_private.h; sourceTree = "<group>"; };
 		9F6425DA1D71FA4700D117F6 /* dyld_priv.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = dyld_priv.h; sourceTree = "<group>"; };
-		9F6425E01D72083500D117F6 /* fix-dyld-build-error.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; name = "fix-dyld-build-error.mm"; path = "runtime/fix-dyld-build-error.mm"; sourceTree = "<group>"; };
+		9F6425E01D72083500D117F6 /* fix-dyld-build-error.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; name = "fix-dyld-build-error.mm"; path = "../../runtime/fix-dyld-build-error.mm"; sourceTree = "<group>"; };
 		9FA940991D3F66D500D1A04E /* objc-object.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "objc-object.h"; path = "runtime/objc-object.h"; sourceTree = "<group>"; };
 		9FA9409B1D3F697700D1A04E /* NSObjCRuntime.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = NSObjCRuntime.h; path = runtime/NSObjCRuntime.h; sourceTree = "<group>"; };
 		9FA9409C1D3F697700D1A04E /* NSObject.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = NSObject.h; path = runtime/NSObject.h; sourceTree = "<group>"; };
@@ -630,7 +630,6 @@
 				83BE02E70FCCB24D00661494 /* objc-runtime-old.h */,
 				838485E50D6D68A200CEA253 /* objc-sel-set.h */,
 				39ABD71F12F0B61800D1054C /* objc-weak.h */,
-				9F6425E01D72083500D117F6 /* fix-dyld-build-error.mm */,
 			);
 			name = "Project Headers";
 			sourceTree = "<group>";
@@ -797,6 +796,7 @@
 		9F6425D91D71FA4700D117F6 /* mach-o */ = {
 			isa = PBXGroup;
 			children = (
+				9F6425E01D72083500D117F6 /* fix-dyld-build-error.mm */,
 				9F6425DA1D71FA4700D117F6 /* dyld_priv.h */,
 			);
 			path = "mach-o";

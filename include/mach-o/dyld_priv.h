@@ -77,6 +77,9 @@ typedef const char* (*dyld_image_state_change_handler)(enum dyld_image_states st
 // state supplied in the callback.  In non-batch mode, the callback is called for each image exactly in the
 // requested state.    
 //
+// xcode 7 中没有问题，xcode 8 中需要添加这个函数的实现，代码我写在了 fix-dyld-build-error.mm 文件中，
+// 如果您是 xcode 7，可以将函数实现注释了，防止出现玄妙的bug，
+// 如果您是 xcode 8，千万不要注释，因为会编译报错
 extern void
 dyld_register_image_state_change_handler(enum dyld_image_states state, bool batch, dyld_image_state_change_handler handler);
 

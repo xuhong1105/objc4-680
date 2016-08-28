@@ -61,7 +61,7 @@ LockHelper::~LockHelper()
     dyldGlobalLockRelease();
 }
 
-
+// xcode 7 中没有问题，xcode 8 中需要添加这个函数的实现
 void
 dyld_register_image_state_change_handler(enum dyld_image_states state, bool batch, dyld_image_state_change_handler handler)
 {
