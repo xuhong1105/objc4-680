@@ -835,11 +835,13 @@ void instrumentObjcMessageSends(BOOL flag)
 #endif
 
 // 为类在堆中分配空间
+// 被 alloc_class_for_subclass() 和 _objc_allocateFutureClass() 两个函数调用
 Class _calloc_class(size_t size)
 {
-#if SUPPORT_GC // 如果有 GC
+#if SUPPORT_GC // 如果有 GC，不用考虑 GC 的情况，越看越晕
     if (UseGC) return (Class) malloc_zone_calloc(gc_zone, 1, size);
 #endif
+    // 绝大多数正常的情况，直接调用 calloc 分配 size 大小的内存
     return (Class) calloc(1, size);
 }
 

@@ -569,6 +569,7 @@ struct locstamped_category_list_t {
 #define RW_INITIALIZING       (1<<28)  // 类正在被初始化
 // class_rw_t->ro is heap copy of class_ro_t
 #define RW_COPIED_RO          (1<<27)  // class_rw_t->ro 是 class_ro_t 堆拷贝过来的
+                                       // 即先在堆中分配内存，然后将 ro 拷贝过去，这时的 ro 就是可读可写的
 // class allocated but not yet registered
 #define RW_CONSTRUCTING       (1<<26)  // 类已经被 allocated，但是没有注册
 // class allocated and registered
@@ -922,9 +923,9 @@ struct class_ro_t {
     
     const char * name;   // 从上面的实例看，应该是类本身的名字
     
-    method_list_t * baseMethodList;  // 基本方法列表
-    protocol_list_t * baseProtocols; // 基本协议列表
-    const ivar_list_t * ivars;       // 类的成员变量列表
+    method_list_t * baseMethodList;  // 基本方法列表，存储编译期确定的方法
+    protocol_list_t * baseProtocols; // 基本协议列表，存储编译期确定的协议
+    const ivar_list_t * ivars;       // 类的成员变量列表，存储编译期确定的成员变量
     
     const uint8_t * weakIvarLayout;  // 记录了哪些是 weak 的 ivar
     
@@ -943,7 +944,7 @@ struct class_ro_t {
      }
      @end
      */
-    property_list_t *baseProperties; // 基本属性列表
+    property_list_t *baseProperties; // 基本属性列表，存储编译期确定的属性
 
     // 获取基本方法列表
     method_list_t *baseMethods() const {
@@ -1564,6 +1565,8 @@ public:
 // http://7ni3rk.com1.z0.glb.clouddn.com/Runtime/class-diagram.jpg
 // 元类的 isa 指向根元类，根元类的 isa 指向自己
 
+// 当创建一个 Objective-C对象时，runtime会在实例变量存储区域后面再分配一点额外的空间。这么做的目的是什么呢？你可以获取这块空间起始指针（用 object_getIndexedIvars），然后就可以索引实例变量（ivars）
+
 struct objc_class : objc_object {
 //    Class ISA;    // 别疑惑，确实是被apple注释了。
                     // 原来是用来存储元类信息的，但是现在不是了，因为 objc_class 继承自 objc_object
@@ -1794,7 +1797,7 @@ struct objc_class : objc_object {
     }
     // 是否是根的元类
     bool isRootMetaclass() {
-        return ISA() == (Class)this; // 类的类型就是自己，即自反
+        return ISA() == (Class)this; // 根元类的 isa 指向自己
     }
 
     // 取得 mangled（改编的）名称
@@ -1857,7 +1860,11 @@ struct objc_class : objc_object {
     }
 };
 
-
+// swift 的类，继承自 objc_class，且多了一些变量
+// 应该是为了更好地与 swift 兼容
+// 内存布局是这样的：[前缀] + [objc_class=[自身数据]+[额外空间]] + [额外空间]
+// classAddressOffset = 前缀数据的大小
+// classSize = 前缀 + objc_class
 struct swift_class_t : objc_class {
     uint32_t flags;
     uint32_t instanceAddressOffset;
@@ -1865,12 +1872,15 @@ struct swift_class_t : objc_class {
     uint16_t instanceAlignMask;
     uint16_t reserved;
 
-    uint32_t classSize;
-    uint32_t classAddressOffset;
+    uint32_t classSize; // 类的大小，包括前缀数据和本身的数据，但是不包括 extraBytes
+    uint32_t classAddressOffset; // swift_class_t 中 objc_class 部分相对于 swift_class_t 起始地址的偏移量
+                                 // 即前缀数据的大小
     void *description;
     // ...
 
-    void *baseAddress() {
+    void *baseAddress() { // alloc_class_for_subclass() 函数中可以看出 baseAddress() 取得的是 swift 类
+                          // 中数据的起始地址，每个 swift 类都有前缀数据和后缀数据，this 减去 classAddressOffset 取得的
+                          // 应该就是前缀数据的起始地址
         return (void *)((uint8_t *)this - classAddressOffset);
     }
 };

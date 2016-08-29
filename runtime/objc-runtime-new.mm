@@ -68,7 +68,10 @@ static bool ClassNSObjectRRSwizzled;
     (unsigned  char)(((uint32_t)(v))>>8),   \
     (unsigned  char)(((uint32_t)(v))>>0)
 
-
+// 一个 IMP，本身不干任何事，只是返回 self
+// 只在 methodizeClass() 中用到，给根元类的 SEL_initialize 指定了对应的 IMP，即 objc_noop_imp
+// 即给根元类发送 SEL_initialize 消息，不会走到它的 +initialize，而是走 objc_noop_imp，啥也不干
+// noop n.等待;无操作
 id objc_noop_imp(id self, SEL _cmd __unused) {
     return self;
 }
@@ -167,7 +170,7 @@ typedef locstamped_category_list_t category_list; // 分类列表结构体类型
  0x3 就是 0b11 就是 2 位被留做了 fixed-up 的标记）
  
  预优化版本：
-    Method lists 来自 shared cache 的话，就是 0b01 (uniqued 唯一的) 或者 0b11 (uniqued and sorted 唯一并且有序的)
+    Method lists 来自 shared cache(shared cache 和动态库有关) 的话，就是 0b01 (uniqued 唯一的) 或者 0b11 (uniqued and sorted 唯一并且有序的)
     (Protocol method lists 协议方法列表不是排好序的，因为它们有 extra parallel data 额外的并行数据)
     运行时 fixed-up 的方法列表取得的是 0b11
  非预优化版本：
@@ -278,35 +281,43 @@ static void try_free(const void *p)
 }
 
 
-// 内部函数，为 supercls
+// 内部函数，为类开辟内存空间，即为 objc_class 对象开辟内存空间
+// 但是如果父类是 swift 类，就需要做特殊处理，因为子类需要继承父类的 extraBytes
+// supercls : 父类，如果是 nil，就当作 oc 类处理
+// extraBytes : 额外的字节，这些字节可以用来存储除了类中定义之外的，额外的实例变量
+// 该函数被 objc_allocateClassPair() 和 objc_duplicateClass() 调用
 static Class 
 alloc_class_for_subclass(Class supercls, size_t extraBytes)
 {
-    // 如果没有父类 或者 父类不是 swift 类，就
-    if (!supercls  ||  !supercls->isSwift()) {
+    if (!supercls  ||  !supercls->isSwift()) { // 如果没有父类 或者 父类不是 swift 类
+        // 就直接调用 _calloc_class 开辟内存，总大小 = objc_class的大小 + 额外需要分配的大小
         return _calloc_class(sizeof(objc_class) + extraBytes);
     }
 
     // Superclass is a Swift class. New subclass must duplicate its extra bits.
+    // 如果父类是一个 swift 类的话，子类必须复制父类的 extra bits
 
     // Allocate the new class, with space for super's prefix and suffix
     // and self's extraBytes.
-    swift_class_t *swiftSupercls = (swift_class_t *)supercls;
-    size_t superSize = swiftSupercls->classSize;
-    void *superBits = swiftSupercls->baseAddress();
-    void *bits = malloc(superSize + extraBytes);
+    swift_class_t *swiftSupercls = (swift_class_t *)supercls; // 父类，swift_class_t 继承自 objc_class，
+                                                              // 所以可以强制转换
+    size_t superSize = swiftSupercls->classSize; // 父类的大小
+    void *superBits = swiftSupercls->baseAddress(); // 父类数据的起始地址（前缀的起始地址？）
+    void *bits = malloc(superSize + extraBytes); // 在堆中开辟 父类大小 + 自身 extraBytes 大小的内存空间
+                                                 // 用来存放新类的数据
 
     // Copy all of the superclass's data to the new class.
-    memcpy(bits, superBits, superSize);
+    memcpy(bits, superBits, superSize); // 将父类数据（从 superBits 开始，大小为 superSize）复制到 bits 中
 
     // Erase the objc data and the Swift description in the new class.
+    // 取得新类的地址，从 bits 开始，长度为 classAddressOffset 的部分是前缀，跳过前缀，才是原来的 objc_class 部分的
     swift_class_t *swcls = (swift_class_t *)
         ((uint8_t *)bits + swiftSupercls->classAddressOffset);
-    bzero(swcls, sizeof(objc_class));
+    bzero(swcls, sizeof(objc_class)); // 将 swcls 中 objc_class 部分都清零
     swcls->description = nil;
 
     // Mark this class as Swift-enhanced.
-    swcls->bits.setIsSwift();
+    swcls->bits.setIsSwift(); // 设置该类是 swift 类
     
     return (Class)swcls;
 }
@@ -315,18 +326,30 @@ alloc_class_for_subclass(Class supercls, size_t extraBytes)
 /***********************************************************************
 * object_getIndexedIvars.
 **********************************************************************/
+// 当创建一个 Objective-C对象时，runtime会在实例变量存储区域后面再分配一点额外的空间，
+// 用 object_getIndexedIvars 获取这块额外空间的起始地址，然后就可以索引实例变量（ivars）
 void *object_getIndexedIvars(id obj)
 {
     uint8_t *base = (uint8_t *)obj;
 
-    if (!obj) return nil;
-    if (obj->isTaggedPointer()) return nil;
+    if (!obj) {
+        return nil;
+    }
+    if (obj->isTaggedPointer()) { // taggedPointer 本来就不是真正的类，所以不存在什么 extraBytes
+        return nil;
+    }
 
-    if (!obj->isClass()) return base + obj->ISA()->alignedInstanceSize();
+    if (!obj->isClass()) { // 如果不是类，就是单纯的实例，那么从 base 开始，向后偏移实例变量的大小，就是额外空间的大小
+        return base + obj->ISA()->alignedInstanceSize();
+    }
 
     Class cls = (Class)obj;
-    if (!cls->isSwift()) return base + sizeof(objc_class);
+    if (!cls->isSwift()) { // 如果不是 swift 的类，那么 base 开始，向后偏移 objc_class 的大小，就是额外空间的大小
+        return base + sizeof(objc_class);
+    }
     
+    // 如果是 swift 的类，那么就要复杂一点了，swift 类有前缀数据，所以向前偏移 swcls->classAddressOffset，
+    // 是前缀的起始地址，从前缀起始地址开始向后偏移整个类的大小，就是额外空间的大小
     swift_class_t *swcls = (swift_class_t *)cls;
     return base - swcls->classAddressOffset + word_align(swcls->classSize);
 }
@@ -337,19 +360,37 @@ void *object_getIndexedIvars(id obj)
 * Reallocates rw->ro if necessary to make it writeable.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 重新为 rw->ro 在堆中分配空间，使其可写（因为原来是编译的时候写在 DATA 数据区中的常量，是只读的）
+/*
+ 比如下面这个 AXPerson 类的 ro，注意看其中的 section ("__DATA,__objc_const")
+ 
+static struct _class_ro_t _OBJC_CLASS_RO_$_AXPerson __attribute__ ((used, section ("__DATA,__objc_const"))) = {
+    0, __OFFSETOFIVAR__(struct AXPerson, _name), sizeof(struct AXPerson_IMPL),
+    (unsigned int)0,
+    0,
+    "AXPerson",
+    (const struct _method_list_t *)&_OBJC_$_INSTANCE_METHODS_AXPerson,
+    0,
+    (const struct _ivar_list_t *)&_OBJC_$_INSTANCE_VARIABLES_AXPerson,
+    0,
+    (const struct _prop_list_t *)&_OBJC_$_PROP_LIST_AXPerson,
+};
+ */
 static class_ro_t *make_ro_writeable(class_rw_t *rw)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 需要被提前上好写锁，因为要操作 objc_class，所以为了保证线程安全，
+                                 // 必须要上锁
 
-    if (rw->flags & RW_COPIED_RO) {
+    if (rw->flags & RW_COPIED_RO) { // 如果 class_rw_t->ro 是 class_ro_t 堆拷贝过来的
+                                    // 那么 ro 就已经是可读可写的了，所以不用再做操作
         // already writeable, do nothing
     } else {
         class_ro_t *ro = (class_ro_t *)
-            memdup(rw->ro, sizeof(*rw->ro));
-        rw->ro = ro;
-        rw->flags |= RW_COPIED_RO;
+            memdup(rw->ro, sizeof(*rw->ro)); // 否则，用 memdup 方法，在堆中分配内存，然后将原来的 rw->ro，拷贝到堆上
+        rw->ro = ro; // rw->ro 指向新的堆上的 ro
+        rw->flags |= RW_COPIED_RO; // 将 rw->ro，标记为堆拷贝的，下回就不需要再拷贝了
     }
-    return (class_ro_t *)rw->ro;
+    return (class_ro_t *)rw->ro; // 返回新的 ro
 }
 
 
@@ -358,15 +399,20 @@ static class_ro_t *make_ro_writeable(class_rw_t *rw)
 * Returns the class => categories map of unattached categories.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 取得一个存放没有被 attached 的分类们的数据结构
+// 这个数据结构是一个静态变量，所以每次返回的都是同一个
 static NXMapTable *unattachedCategories(void)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 需要被上写锁
 
-    static NXMapTable *category_map = nil;
+    static NXMapTable *category_map = nil; // 静态变量
 
-    if (category_map) return category_map;
+    if (category_map) { // 如果有值，就直接返回
+        return category_map;
+    }
 
     // fixme initial map size
+    // 否则，创建一个
     category_map = NXCreateMapTable(NXPtrValueMapPrototype, 16);
 
     return category_map;
@@ -435,11 +481,15 @@ static void removeUnattachedCategoryForClass(category_t *cat, Class cls)
 * deletes them from the list. 
 * The result must be freed by the caller. 
 * Locking: runtimeLock must be held by the caller.
+ 
+ 返回 cls 类的 unattached 分类列表，并且将其从 unattachedCategories 中删除
+ 调用者必须负责 unattached 分类列表 的释放
+ 第二个参数 realizing 压根儿没用
 **********************************************************************/
 static category_list *
 unattachedCategoriesForClass(Class cls, bool realizing)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // 必须事先加写锁
     return (category_list *)NXMapRemove(unattachedCategories(), cls);
 }
 
@@ -582,7 +632,7 @@ fixupMethodList(method_list_t *mlist, bool bundleCopy, bool sort)
     mlist->setFixedUp(); // 设置 mlist 已经是 fixed-up 的了
 }
 
-// 准备 方法列表 的函数，参数是一组方法列表
+// 准备 方法列表 的函数，参数是一组方法列表，主要工作是将方法列表 fixup 了，然后检查是否有自定义 AWZ/RR
 // addedLists : 方法列表数组的首地址
 // addedCount : 方法列表数组中元素的数量
 // baseMethods : 是否是基本方法，就是 class_ro_t 中的 baseMethodList
@@ -647,7 +697,7 @@ prepareMethodLists(Class cls, method_list_t **addedLists, int addedCount,
 // Attach method lists and properties and protocols from categories to a class.
 // Assumes the categories in cats are all loaded and sorted by load order, 
 // oldest categories first.
-// 从分类列表中添加方法列表、属性和协议到一个类中，
+// 从分类列表中添加方法列表、属性和协议到 cls 类中，
 // 假定 cats 中的分类都已经被加载，并且按照加载的顺序排好序了，老的分类排前面，新的排后面
 // cats : 分类列表，每个元素都是一个分类；
 // flush_caches : 是否清空 cls 类的方法缓存，如果是 YES，会调用 flushCaches() 函数清空缓存
@@ -731,10 +781,12 @@ attachCategories(Class cls, category_list *cats, bool flush_caches)
 * Attaches any outstanding categories.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
-// fix-up cls 类的方法列表、协议列表、属性列表，就是排好序
-// 将所有分类中的方法、属性、协议加载到 methods、 properties 和 protocols 中
-// runtimeLock 读写锁必须被调用者上写锁，保证线程安全
+// 1. fix-up cls 类的方法列表、协议列表、属性列表（但是看代码，被 fix-up 的只有方法列表啊）
+//    将 cls 类的所有没有被 attach 的分类 attach 到 cls 上
+// 2. 即将分类中的方法、属性、协议添加到 methods、 properties 和 protocols 中
+//    runtimeLock 读写锁必须被调用者上写锁，保证线程安全
 // 本函数只被 realizeClass() 函数调用
+// methodize 美 ['meθədaiz] vt. 使…有条理；为…定顺序
 static void methodizeClass(Class cls)
 {
     runtimeLock.assertWriting(); // 看调用者是否已经正确地将 runtimeLock 上了写锁
@@ -742,7 +794,7 @@ static void methodizeClass(Class cls)
     bool isMeta = cls->isMetaClass(); // 记录 cls 类是否是元类
     auto rw = cls->data(); // 取得 cls 中的 rw，因为在 realizeClass() 中已经处理好了 cls->data()，
                            // 所以里面现在存的确定是 rw，而不是 ro
-    auto ro = rw->ro; // 取得 rw 中的 ro
+    auto ro = rw->ro; // 取得 rw->ro
 
     // Methodizing for the first time
     if (PrintConnecting) {
@@ -751,17 +803,20 @@ static void methodizeClass(Class cls)
     }
 
     // Install methods and properties that the class implements itself.
+    // 取得 ro 中的 baseMethodList，在将其 prepare 后，插入 rw 的方法列表数组中
     method_list_t *list = ro->baseMethods();
     if (list) {
         prepareMethodLists(cls, &list, 1, YES, isBundleClass(cls));
         rw->methods.attachLists(&list, 1);
     }
 
+    // 将 ro 中的 baseProperties 插入 rw 中的属性列表数组中
     property_list_t *proplist = ro->baseProperties;
     if (proplist) {
         rw->properties.attachLists(&proplist, 1);
     }
 
+    // 将 ro 中的 baseProtocols 插入 rw 中的协议列表数组中
     protocol_list_t *protolist = ro->baseProtocols;
     if (protolist) {
         rw->protocols.attachLists(&protolist, 1);
@@ -769,14 +824,19 @@ static void methodizeClass(Class cls)
 
     // Root classes get bonus method implementations if they don't have 
     // them already. These apply before category replacements.
-    if (cls->isRootMetaclass()) {
+    if (cls->isRootMetaclass()) { // 如果是根元类
         // root metaclass
+        // 给根元类的 SEL_initialize 指定了对应的 IMP objc_noop_imp
+        // 即给根元类发送 SEL_initialize 消息，不会走到它的 +initialize，而是走 objc_noop_imp，里面啥也不干
         addMethod(cls, SEL_initialize, (IMP)&objc_noop_imp, "", NO);
     }
 
     // Attach categories.
-    category_list *cats = unattachedCategoriesForClass(cls, true /*realizing*/);
-    attachCategories(cls, cats, false /*don't flush caches*/);
+    // 给 cls 类附加分类，unattachedCategoriesForClass 会返回 cls 类的没有被附加的类
+    category_list *cats = unattachedCategoriesForClass(cls, true /*realizing 其实这个参数压根没用*/);
+    // 从分类列表中添加方法列表、属性和协议到 cls 类中
+    // #疑问：attachCategories 要求分类列表中是排好序的，老的分类排前面，新的排后面，那么排序是在哪里做的呢？？？？
+    attachCategories(cls, cats, false /*不清空缓存 因为这时候压根连缓存都没有 don't flush caches*/);
 
     if (PrintConnecting) {
         if (cats) {
@@ -788,7 +848,10 @@ static void methodizeClass(Class cls)
         }
     }
     
-    if (cats) free(cats);
+    if (cats) {
+        free(cats); // 将分类列表释放，见 unattachedCategoriesForClass，
+                    // 里面着重强调了调用方需要负责释放分类列表
+    }
 
 #if DEBUG
     // Debug: sanity-check all SELs; log method list contents
@@ -807,10 +870,12 @@ static void methodizeClass(Class cls)
 /***********************************************************************
 * remethodizeClass
 * Attach outstanding categories to an existing class.
-* Fixes up cls's method list, protocol list, and property list.
+* Fixes up cls's method list, protocol list, and property list.（瞎说，哪里有做这事儿）
 * Updates method caches for cls and its subclasses.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 再次 methodize 类 cls，会重新 attachCategories 一次未被 attach 的分类们
+// 该函数被 _read_images() 函数调用
 static void remethodizeClass(Class cls)
 {
     category_list *cats;
@@ -821,14 +886,16 @@ static void remethodizeClass(Class cls)
     isMeta = cls->isMetaClass();
 
     // Re-methodizing: check for more categories
+    // 取得 cls 类的未被 attach 的分类列表
     if ((cats = unattachedCategoriesForClass(cls, false/*not realizing*/))) {
+        
         if (PrintConnecting) {
             _objc_inform("CLASS: attaching categories to class '%s' %s", 
                          cls->nameForLogging(), isMeta ? "(meta)" : "");
         }
-        
-        attachCategories(cls, cats, true /*flush caches*/);        
-        free(cats);
+        // 将分类列表 attach 附加到 cls 类上，因为这不是第一次 methodize，所以需要清空缓存，因为原来的缓存也已经废了
+        attachCategories(cls, cats, true /* 清空方法缓存 flush caches*/);
+        free(cats); // 将 cats 释放，原因见 unattachedCategoriesForClass()
     }
 }
 
@@ -2628,6 +2695,7 @@ readProtocol(protocol_t *newproto, Class protocol_class,
 //extern "C" int dyld_get_program_sdk_version();
 #define DYLD_MACOSX_VERSION_10_11 MAC_OS_X_VERSION_10_11
 
+// 该函数被 map_images_nolock() 调用
 void _read_images(header_info **hList, uint32_t hCount)
 {
     header_info *hi;

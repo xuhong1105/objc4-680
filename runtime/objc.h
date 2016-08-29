@@ -205,6 +205,7 @@ OBJC_EXPORT const char *object_getClassName(id obj)
  *  guaranteed, even if the area following the object's last ivar is more aligned than that.
  * @note In a garbage-collected environment, the memory is scanned conservatively.
  */
+// 取得 obj 对象中 extraBytes 额外数据的地址
 OBJC_EXPORT void *object_getIndexedIvars(id obj)
     __OSX_AVAILABLE_STARTING(__MAC_10_0, __IPHONE_2_0);
 

@@ -186,6 +186,8 @@ OBJC_EXPORT const char *object_getClassName(id obj)
  *  guaranteed, even if the area following the object's last ivar is more aligned than that.
  * @note In a garbage-collected environment, the memory is scanned conservatively.
  */
+// 当创建一个 Objective-C对象时，runtime会在实例变量存储区域后面再分配一点额外的空间，
+// 用 object_getIndexedIvars 获取这块额外空间的起始地址，然后就可以索引实例变量（ivars）
 OBJC_EXPORT void *object_getIndexedIvars(id obj)
     __OSX_AVAILABLE_STARTING(__MAC_10_0, __IPHONE_2_0)
     OBJC_ARC_UNAVAILABLE;
@@ -799,6 +801,8 @@ OBJC_EXPORT Class objc_getFutureClass(const char *name)
  * 
  * @return An instance of the class \e cls.
  */
+// 创建一个 cls 类的实例
+// extraBytes : 需要开辟的额外空间大小，这些字节可以用来存储除了类中定义之外的，额外的实例变量
 OBJC_EXPORT id class_createInstance(Class cls, size_t extraBytes)
     __OSX_AVAILABLE_STARTING(__MAC_10_0, __IPHONE_2_0)
     OBJC_ARC_UNAVAILABLE;
