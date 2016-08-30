@@ -140,7 +140,8 @@ Protocol *getPreoptimizedProtocol(const char *name)
 //    return (Protocol *)protocols->getProtocol(name);
 }
 
-
+// 根据 name 查找预优化的类
+// 该函数只被 getClass_impl() 函数调用
 Class getPreoptimizedClass(const char *name)
 {
     objc_clsopt_t *classes = opt ? opt->clsopt() : nil;

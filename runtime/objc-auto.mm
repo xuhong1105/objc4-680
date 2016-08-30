@@ -1095,6 +1095,8 @@ static void gc_block_init(void) {
 **********************************************************************/
 
 // This is a self-contained hash table of all classes.  The first two elements contain the (size-1) and count.
+// 这是一个独立的存有所有类(#疑问：可能只有经过注册的类？？)的哈希表
+// 第一个元素是 容量-1；第二个元素是元素数目
 static volatile Class *AllClasses = nil;
 
 #define SHIFT 3
@@ -1161,6 +1163,7 @@ static void addClassHelper(uintptr_t *table, uintptr_t candidate) {
 }
 
 // lock held by callers
+// 添加一个已注册的类
 void objc_addRegisteredClass(Class candidate) {
     if (!UseGC) return;
     uintptr_t *table = (uintptr_t *)AllClasses;

@@ -913,19 +913,47 @@ static void remethodizeClass(Class cls)
 * Classes whose duplicates are in the preoptimized table are not included.
 * Most code should use getNonMetaClass() instead of reading this table.
 * Locking: runtimeLock must be read- or write-locked by the caller
+ 
+ nonMetaClasses 非元类的类，即传说中的 secondary table 二级映射表（一级是 gdb_objc_realized_classes）
+ 一些情况下被用于 +initialize 和 +resolveClassMethod:
+ 这个映射并不包括所有的类-元类对，它只包括一些元类，那些元类的实例类将会在 runtime-allocated named-class 表中（#疑问：这又是什么鬼），但并不是因为一些同名的其他类在那个表中
+ 不包括 no duplicates 没有副本的类（没有副本的类被存在了 gdb_objc_realized_classes 中）
+ 不包括不在 preoptimized named-class 表中的类
+ 不包括副本处于 preoptimized 表中的类
+ 绝大多数代码应该使用 getNonMetaClass() 代替直接读取这个表 (getNonMetaClass() 中确实调用了 nonMetaClasses())
+ runtimeLock 必须被调用者事先上好读锁或者写锁
+ 该函数被 addNonMetaClass() / getNonMetaClass() / removeNonMetaClass() 函数调用
 **********************************************************************/
-static NXMapTable *nonmeta_class_map = nil;
+static NXMapTable *nonmeta_class_map = nil; // 静态变量，存储 metacls - cls 映射的
+
 static NXMapTable *nonMetaClasses(void)
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // 需要被调用方事先加锁
 
-    if (nonmeta_class_map) return nonmeta_class_map;
+    if (nonmeta_class_map) return nonmeta_class_map; // 如果非空就直接返回
 
     // nonmeta_class_map is typically small
+    // 空的话，就创建一个
     INIT_ONCE_PTR(nonmeta_class_map, 
                   NXCreateMapTable(NXPtrValueMapPrototype, 32), 
                   NXFreeMapTable(v));
 
+    // 这个宏展开后是这个样子的：
+    /*
+    do {
+        if (nonmeta_class_map) break; // 如果已经有值，就结束外层循环
+        __typeof__(nonmeta_class_map) v = NXCreateMapTable(NXPtrValueMapPrototype, 32);
+        while (!nonmeta_class_map) {
+            // 查看二级指针 var 指向的值是否等于0，如果等于，就将 create 指向的值赋给 var，结束里层循环，否则继续尝试
+            if (OSAtomicCompareAndSwapPtrBarrier(0, (void*)v, (void**)&nonmeta_class_map)){
+                goto done_1;
+            }
+        }
+        NXFreeMapTable(v); // #疑问：按照逻辑，里层循环会直接跳到 done，压根儿不可能走到这行
+    done_1:; // done 里啥都没做
+    } while (0);
+    */
+    
     return nonmeta_class_map;
 }
 
@@ -934,23 +962,30 @@ static NXMapTable *nonMetaClasses(void)
 * addNonMetaClass
 * Adds metacls => cls to the secondary metaclass map
 * Locking: runtimeLock must be held by the caller
+ 
+ 添加一个 metacls -> cls 的映射到 secondary metaclass map(二级元类映射表)
+ cls 类不能是元类，即一定是实例类，cls 的元类对应的实例类不能有旧值
+ 该函数只被 addNamedClass 函数调用
 **********************************************************************/
 static void addNonMetaClass(Class cls)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // 需要事先加写锁
+    
     void *old;
     old = NXMapInsert(nonMetaClasses(), cls->ISA(), cls);
+                // 将 cls->ISA() 即 cls 的元类 与 cls 类插入 nonMetaClasses 表中
+                // key : cls 的元类，value : cls 类
 
-    assert(!cls->isMetaClass());
-    assert(cls->ISA()->isMetaClass());
-    assert(!old);
+    assert(!cls->isMetaClass()); // cls 绝不能是元类
+    assert(cls->ISA()->isMetaClass()); // cls 的 isa 必须是元类
+    assert(!old); // cls 的元类对应实例类不能有旧值
 }
 
-
+// 从 nonMetaClasses（二级映射表）中移除指定的非元类
 static void removeNonMetaClass(Class cls)
 {
-    runtimeLock.assertWriting();
-    NXMapRemove(nonMetaClasses(), cls->ISA());
+    runtimeLock.assertWriting(); // 需要事先加写锁
+    NXMapRemove(nonMetaClasses(), cls->ISA()); // 移除。其中 key 是 cls 的元类
 }
 
 
@@ -1026,6 +1061,10 @@ static char *copySwiftV1DemangledName(const char *string, bool isProtocol = fals
 * Returns the Swift 1.0 mangled form of the given class or protocol name. 
 * Returns nil if the string doesn't look like an unmangled Swift name.
 * The result must be freed with free().
+ 
+ 将给定的类名或者协议名处理成 Swift 1.0 的 mangled name(重整名字) 的格式
+ 如果 string 与 unmangled(重整前) 的格式不符合，就返回 nil，
+ 结果是在堆中分配的，所以调用方需要负责 free 它
 **********************************************************************/
 static char *copySwiftV1MangledName(const char *string, bool isProtocol = false)
 {
@@ -1076,41 +1115,59 @@ static char *copySwiftV1MangledName(const char *string, bool isProtocol = false)
 * Locking: runtimeLock must be read- or write-locked by the caller.
 **********************************************************************/
 
-// This is a misnomer: gdb_objc_realized_classes is actually a list of 
+// This is a misnomer（用词不当、误称）: gdb_objc_realized_classes is actually a list of
 // named classes not in the dyld shared cache, whether realized or not.
+
+// 这是一个误称（知道是误称还不改？？）：gdb_objc_realized_classes 事实上是一个装了不在 dyld shared cache 中的
+// named classes 的列表，无论是否是 realized 的
+// key: name  value: Class
+// 我猜，这个应该就是相对于 nonmeta_class_map 的一级映射表吧，见 getNonMetaClass()
 NXMapTable *gdb_objc_realized_classes;  // exported for debuggers in objc-gdb.h
 
+// 根据名字查找类，这个类可能没有被 realize 过
+// 该函数被 getClass() 函数调用
 static Class getClass_impl(const char *name)
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // 必须事先被加锁
 
-    // allocated in _read_images
-    assert(gdb_objc_realized_classes);
+    // allocated in _read_images 
+    assert(gdb_objc_realized_classes); // gdb_objc_realized_classes 是在 _read_images() 函数中被初始化的(分配内存)
 
     // Try runtime-allocated table
+    // 从 gdb_objc_realized_classes 根据 key 即 name 查找类
     Class result = (Class)NXMapGet(gdb_objc_realized_classes, name);
-    if (result) return result;
+    if (result) {
+        return result; // 找到了，就将其返回
+    }
 
     // Try table from dyld shared cache
+    // 如果在 gdb_objc_realized_classes 中找不到，就去预优化的类中找找看（跟 dyld shared cache 有关）
     return getPreoptimizedClass(name);
 }
 
+// 根据 name 查找类，实际上调用的还是 getClass_impl，但是需要对 swift 的类做一些处理
 static Class getClass(const char *name)
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // 必须事先被加锁
 
     // Try name as-is
-    Class result = getClass_impl(name);
-    if (result) return result;
-
-    // Try Swift-mangled equivalent of the given name.
-    if (char *swName = copySwiftV1MangledName(name)) {
-        result = getClass_impl(swName);
-        free(swName);
-        return result;
+    Class result = getClass_impl(name); // 先直接用 name 查找
+    if (result) {
+        return result; // 找到直接返回
     }
 
-    return nil;
+    // 如果找不到，就处理成 swift 类的 mangled name 试试
+    
+    // Try Swift-mangled equivalent of the given name.
+    if (char *swName = copySwiftV1MangledName(name)) { // 尝试转成 swift mangled name，函数里判断 name 是否符合
+                                                       // swift unmangled name 的格式，如果符合就返回 mangled name，
+                                                       // 否则返回 nil
+        result = getClass_impl(swName); // 用 mangled name 再去找
+        free(swName); // 将 swName 释放，原因见 copySwiftV1MangledName()
+        return result; // 不用再判断 result 是否有值，直接将它返回
+    }
+
+    return nil; // 如果连 swift 类都不是，就返回 nil
 }
 
 
@@ -1119,21 +1176,31 @@ static Class getClass(const char *name)
 * Adds name => cls to the named non-meta class map.
 * Warns about duplicate class names and keeps the old mapping.
 * Locking: runtimeLock must be held by the caller
+ 
+ 添加 name -> cls 对到 named non-meta class map（gdb_objc_realized_classes）中
+ 警告有副本，但是会保持老的映射，即会有多份，
+ 新的映射被存在了 secondary metaclass map(二级元类映射表) 表中，见 addNonMetaClass()，
+ replacing : 被代替的老的 cls，如果有旧映射，但是与 replacing 不符合，还是会保留旧映射，否则新值会将 gdb_objc_realized_classes 中的旧映射覆盖
 **********************************************************************/
 static void addNamedClass(Class cls, const char *name, Class replacing = nil)
 {
     runtimeLock.assertWriting();
+    
     Class old;
+    // 先根据 name 查找是否有对应的旧类，如果有，并且 old 与 replacing 不同
+    // 则报警告，但是会保持老的映射，插入新的映射
     if ((old = getClass(name))  &&  old != replacing) {
-        inform_duplicate(name, old, cls);
+        
+        inform_duplicate(name, old, cls); // 给出警告：名字为 name 的类有两份实现，但只有一份会被使用
 
         // getNonMetaClass uses name lookups. Classes not found by name 
         // lookup must be in the secondary meta->nonmeta table.
-        addNonMetaClass(cls);
+        addNonMetaClass(cls); // 将 cls 存入 matacls->cls 的二级映射表中
     } else {
+        // 如果没有旧值，或者指定要覆盖旧值（replacing == old），就将新的 name->cls 对插入 gdb_objc_realized_classes
         NXMapInsert(gdb_objc_realized_classes, name, cls);
     }
-    assert(!(cls->data()->flags & RO_META));
+    assert(!(cls->data()->flags & RO_META)); // cls 不能是元类
 
     // wrong: constructed classes are already realized when they get here
     // assert(!cls->isRealized());
@@ -1145,15 +1212,18 @@ static void addNamedClass(Class cls, const char *name, Class replacing = nil)
 * Removes cls from the name => cls map.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 移除 named class（#疑问：难道 named class 只是指这个类在表中存有 类名->类 的映射？）
 static void removeNamedClass(Class cls, const char *name)
 {
     runtimeLock.assertWriting();
-    assert(!(cls->data()->flags & RO_META));
-    if (cls == NXMapGet(gdb_objc_realized_classes, name)) {
-        NXMapRemove(gdb_objc_realized_classes, name);
+    assert(!(cls->data()->flags & RO_META)); // cls 不能是元类
+    if (cls == NXMapGet(gdb_objc_realized_classes, name)) { // 先看 gdb_objc_realized_classes 中有没有
+        NXMapRemove(gdb_objc_realized_classes, name); // 有的话，将其移除
     } else {
         // cls has a name collision with another class - don't remove the other
         // but do remove cls from the secondary metaclass->class map.
+        // cls 类和另一个类有名字冲突，不移除另一个类
+        // 只将 cls 类从二级 metaclass->class 映射表中移除
         removeNonMetaClass(cls);
     }
 }
@@ -1166,13 +1236,14 @@ static void removeNamedClass(Class cls, const char *name)
 **********************************************************************/
 static NXHashTable *realized_class_hash = nil; // 记录所有经过 realized 的非元类
 
-// 取得所有经过 realized 的非元类
+// 取得存有所有经过 realized 的非元类的哈希表
 static NXHashTable *realizedClasses(void)
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // 检查是否已经加上锁
 
     // allocated in _read_images
-    assert(realized_class_hash);
+    assert(realized_class_hash); // realized_class_hash 是在 _read_images() 中被分配内存的，所以这里只是检查是否
+                                 // 确实已经被分配了内存
 
     return realized_class_hash;
 }
@@ -1185,7 +1256,8 @@ static NXHashTable *realizedClasses(void)
 **********************************************************************/
 static NXHashTable *realized_metaclass_hash = nil; // 记录所有经过 realized 的元类
 
-// 取得所有经过 realized 的元类
+// 取得存有所有经过 realized 的元类的哈希表
+// 该函数被 addRealizedMetaclass()/flushCaches()/removeRealizedMetaclass()函数调用
 static NXHashTable *realizedMetaclasses(void)
 {    
     runtimeLock.assertLocked();
@@ -1202,14 +1274,19 @@ static NXHashTable *realizedMetaclasses(void)
 * Adds cls to the realized non-meta class hash.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 添加一个经过 realized 的非元类到 realized_class_hash 哈希表中，
+// 还会顺便将其添加到已注册的类的哈希表中(objc-auto.mm 中的 AllClasses)，
+// 但是不能有旧值，即 cls 类不能重复添加
+// 该函数被 objc_duplicateClass()/objc_registerClassPair()/realizeClass() 函数调用
 static void addRealizedClass(Class cls)
 {
     runtimeLock.assertWriting();
     void *old;
-    old = NXHashInsert(realizedClasses(), cls);
-    objc_addRegisteredClass(cls);
-    assert(!cls->isMetaClass());
-    assert(!old);
+    old = NXHashInsert(realizedClasses(), cls); // 将 cls 插入 realized_class_hash 哈希表中
+    objc_addRegisteredClass(cls); // 将 cls 添加到已注册类的哈希表中(objc-auto.mm 中的 AllClasses)
+    
+    assert(!cls->isMetaClass()); // cls 不能是元类
+    assert(!old); // 不能有旧值
 }
 
 
@@ -1218,13 +1295,16 @@ static void addRealizedClass(Class cls)
 * Removes cls from the realized non-meta class hash.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 将 cls 类从 realized_class_hash 表中移除
+// 还会顺便将 cls 从 已注册类的哈希表中移除(objc-auto.mm 中的 AllClasses)
+// 该函数被 detach_class() 函数调用
 static void removeRealizedClass(Class cls)
 {
     runtimeLock.assertWriting();
-    if (cls->isRealized()) {
-        assert(!cls->isMetaClass());
-        NXHashRemove(realizedClasses(), cls);
-        objc_removeRegisteredClass(cls);
+    if (cls->isRealized()) { // 如果 cls 没有经过 realize，那么它是不会出现在 realized_class_hash 中的，所以也不用移除
+        assert(!cls->isMetaClass()); // cls 不能是元类
+        NXHashRemove(realizedClasses(), cls); // 将 cls 类从 realized_class_hash 表中移除
+        objc_removeRegisteredClass(cls); // 顺便将 cls 从 已注册类的哈希表中移除(objc-auto.mm 中的 AllClasses)
     }
 }
 
@@ -1234,13 +1314,16 @@ static void removeRealizedClass(Class cls)
 * Adds cls to the realized metaclass hash.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 添加 cls 元类到 realized_metaclass_hash 哈希表中
+// 不能有旧值，即不能重复添加
+// 该函数被 objc_registerClassPair() 和 realizeClass() 函数调用
 static void addRealizedMetaclass(Class cls)
 {
     runtimeLock.assertWriting();
     void *old;
-    old = NXHashInsert(realizedMetaclasses(), cls);
-    assert(cls->isMetaClass());
-    assert(!old);
+    old = NXHashInsert(realizedMetaclasses(), cls); // 将 cls 元类添加到 realized_metaclass_hash 哈希表中
+    assert(cls->isMetaClass()); // cls 必须是元类
+    assert(!old); // 不能有旧值
 }
 
 
@@ -1249,12 +1332,15 @@ static void addRealizedMetaclass(Class cls)
 * Removes cls from the realized metaclass hash.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 将 cls 从 realized_metaclass_hash 哈希表中移除
+// caller : detach_class()
 static void removeRealizedMetaclass(Class cls)
 {
     runtimeLock.assertWriting();
-    if (cls->isRealized()) {
-        assert(cls->isMetaClass());
-        NXHashRemove(realizedMetaclasses(), cls);
+    if (cls->isRealized()) { // 如果 cls 没有经过 realize，那么它是不会
+                             // 出现在 realized_metaclass_hash 中的，所以也不用移除
+        assert(cls->isMetaClass()); // cls 必须是元类
+        NXHashRemove(realizedMetaclasses(), cls); // 将 cls 从 realized_metaclass_hash 哈希表中移除
     }
 }
 
@@ -1264,13 +1350,19 @@ static void removeRealizedMetaclass(Class cls)
 * Returns the classname => future class map for unrealized future classes.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
-static NXMapTable *future_named_class_map = nil;
+static NXMapTable *future_named_class_map = nil; // 存有 classname -> future class 映射的映射表
+
+// 取得 future_named_class_map 映射表
+// callers : _objc_allocateFutureClass() / addFutureNamedClass()
 static NXMapTable *futureNamedClasses()
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // 必须事先加写锁
     
-    if (future_named_class_map) return future_named_class_map;
+    if (future_named_class_map) { // 如果非空，就直接返回
+        return future_named_class_map;
+    }
 
+    // 否则创建一个
     // future_named_class_map is big enough for CF's classes and a few others
     future_named_class_map = 
         NXCreateMapTable(NXStrValueMapPrototype, 32);
@@ -1284,25 +1376,30 @@ static NXMapTable *futureNamedClasses()
 * Installs cls as the class structure to use for the named class if it appears.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 添加 future 的类 cls 到 future_named_class_map 映射表中
+// caller : _objc_allocateFutureClass()
 static void addFutureNamedClass(const char *name, Class cls)
 {
     void *old;
 
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // 必须事先加写锁
 
     if (PrintFuture) {
         _objc_inform("FUTURE: reserving %p for %s", (void*)cls, name);
     }
 
-    class_rw_t *rw = (class_rw_t *)calloc(sizeof(class_rw_t), 1);
-    class_ro_t *ro = (class_ro_t *)calloc(sizeof(class_ro_t), 1);
-    ro->name = strdup(name);
-    rw->ro = ro;
-    cls->setData(rw);
-    cls->data()->flags = RO_FUTURE;
+    class_rw_t *rw = (class_rw_t *)calloc(sizeof(class_rw_t), 1); // 为 cls 开辟 rw
+    class_ro_t *ro = (class_ro_t *)calloc(sizeof(class_ro_t), 1); // 为 cls 开辟 ro
+    ro->name = strdup(name); // 在堆中拷贝 name 字符串
+    rw->ro = ro;        // rw->ro 指向新 ro
+    cls->setData(rw);   // 将 rw 放入 cls 中
+    cls->data()->flags = RO_FUTURE;  // 将 cls 标记为是 future 的
 
+    // 将 name->cls 映射插入 future_named_class_map 映射表中
+    // NXMapKeyCopyingInsert 和 NXMapInsert 用处一样，但是会先在堆中复制 key（为了安全）
     old = NXMapKeyCopyingInsert(futureNamedClasses(), name, cls);
-    assert(!old);
+    
+    assert(!old); // 不能有旧值
 }
 
 
@@ -1313,17 +1410,26 @@ static void addFutureNamedClass(const char *name, Class cls)
 * Returns nil if the name is not used by a future class.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 将指定 name 对应的 future 的类从 future_named_class_map 中移除
+// 因为 这个类 已经被 realized 过了，它已经不再处于 future 状态
+// 返回 name 对应的 future class，如果没有对应的 future class，就返回 nil
+// caller : readClass()
 static Class popFutureNamedClass(const char *name)
 {
     runtimeLock.assertWriting();
 
     Class cls = nil;
 
-    if (future_named_class_map) {
+    if (future_named_class_map) { // 如果 future_named_class_map 非空
+        // 利用 key name 将 future class 从 future_named_class_map 移除
+        // NXMapKeyFreeingRemove 与 NXMapRemove 功能一样，但是会释放 key，因为 key 是在堆中分配的，原因见 NXMapKeyCopyingInsert()
         cls = (Class)NXMapKeyFreeingRemove(future_named_class_map, name);
+        
+        // 如果 name 确实有对应的 future class，并且当前 future_named_class_map 已经空了
+        // 就将 future_named_class_map 释放
         if (cls && NXCountMapTable(future_named_class_map) == 0) {
             NXFreeMapTable(future_named_class_map);
-            future_named_class_map = nil;
+            future_named_class_map = nil; // 防止野指针
         }
     }
 
@@ -1337,16 +1443,25 @@ static Class popFutureNamedClass(const char *name)
 * Returns the oldClass => nil map for ignored weak-linked classes.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+// 重映射的类
+// 若是已经被 realized 的 future 的类，返回 oldClass -> newClass 的映射
+// 若是 ignored weak-linked（被忽略的弱连接？）的类，就返回 oldClass -> nil 的映射
+// create : 如果 remapped_class_map 为空的话，是否创建
+// 调用者 ：addRemappedClass() / noClassesRemapped() / remapClass()
 static NXMapTable *remappedClasses(bool create)
 {
+    // 存储 remapped 类的映射表，key : oldClass  value : newClass or nil
     static NXMapTable *remapped_class_map = nil;
 
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // runtimeLock 必须事先被加锁（写锁 or 读锁）
 
-    if (remapped_class_map) return remapped_class_map;
-    if (!create) return nil;
+    if (remapped_class_map) return remapped_class_map; // 若不为空，直接返回
+    
+    if (!create) return nil; // 为空，但是指定不创建，则返回 nil
 
     // remapped_class_map is big enough to hold CF's classes and a few others
+    
+    // 有关 INIT_ONCE_PTR 可以看 nonMetaClasses()，里面也用到了 INIT_ONCE_PTR
     INIT_ONCE_PTR(remapped_class_map, 
                   NXCreateMapTable(NXPtrValueMapPrototype, 32), 
                   NXFreeMapTable(v));
@@ -1360,15 +1475,18 @@ static NXMapTable *remappedClasses(bool create)
 * Returns YES if no classes have been remapped
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+// remapped_class_map 是否是空的
+// 调用者：_read_images()
 static bool noClassesRemapped(void)
 {
     runtimeLock.assertLocked();
 
+    // 如果 remapped_class_map == nil ，则它是空的，这默认了它非空的时候，一定有元素，这有利于优化速度
     bool result = (remappedClasses(NO) == nil);
 #if DEBUG
     // Catch construction of an empty table, which defeats optimization.
     NXMapTable *map = remappedClasses(NO);
-    if (map) assert(NXCountMapTable(map) > 0);
+    if (map) assert(NXCountMapTable(map) > 0); // DEBUG 模式下，检查一下 map 非空的时候，元素数目是否真的一定 >0
 #endif
     return result;
 }
@@ -1380,9 +1498,13 @@ static bool noClassesRemapped(void)
 * OR newcls is nil, replacing ignored weak-linked class oldcls.
 * Locking: runtimeLock must be write-locked by the caller
 **********************************************************************/
+// 添加一个 remapped 的类到 remapped_class_map 映射表中
+// newcls 是一个已经被 realized 的 future 类，oldcls 是老的 future 类
+// 或者 newcls 是 nil，oldcls 是 ignored weak-linked 类（被忽略的、弱链接的类 #疑问：什么意思？？）
+// 调用者 ：readClass()
 static void addRemappedClass(Class oldcls, Class newcls)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 必须事先被加上写锁
 
     if (PrintFuture) {
         _objc_inform("FUTURE: using %p instead of %p for %s", 
@@ -1390,8 +1512,11 @@ static void addRemappedClass(Class oldcls, Class newcls)
     }
 
     void *old;
+    // 将 oldcls 为 key，newcls 为 value 插入到 remapped_class_map 映射表 中，
+    // remappedClasses(YES) 中 YES 是指定如果 remapped_class_map 为空的话，就创建一个
     old = NXMapInsert(remappedClasses(YES), oldcls, newcls);
-    assert(!old);
+    
+    assert(!old); // old 不能为空
 }
 
 
@@ -1402,27 +1527,39 @@ static void addRemappedClass(Class oldcls, Class newcls)
 * Returns nil if cls is ignored because of weak linking.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+// 返回 cls 类的 live class（活动的类）指针，这个指针可能指向一个已经被 reallocated 的类结构体（#疑问：什么意思？？）
+// 若 cls 是 weak linking（弱连接），则 cls 会被忽略，而返回 nil
+// 好拗口，这个函数其实就是从 remapped_class_map 以 cls 为 key ，取出 realized 后的 future class
+// 调用者 ：_class_remap() / missingWeakSuperclass() / realizeClass() /
+//         remapClass() / remapClassRef()
 static Class remapClass(Class cls)
 {
     runtimeLock.assertLocked();
 
-    Class c2;
+    Class c2; // 这里没有初始化为 nil，有没有可能指向一块垃圾内存？？
 
-    if (!cls) return nil;
+    if (!cls) return nil; // 如果 cls 是 nil，则直接返回 nil
 
-    NXMapTable *map = remappedClasses(NO);
+    NXMapTable *map = remappedClasses(NO); // 取得 remapped_class_map 映射表，若为空，不创建
+    // 如果 map 非空，或者 cls 不是一个 key，NX_MAPNOTAKEY(not a key)，即 cls 压根儿不在 remapped_class_map 映射表里
+    // 则将 cls 返回
     if (!map  ||  NXMapMember(map, cls, (void**)&c2) == NX_MAPNOTAKEY) {
         return cls;
     } else {
-        return c2;
+        return c2;  // 1. 如果 map 是空，则返回的 c2 == nil（#疑问：有没有可能是垃圾内存？？），因为 || 的断路特点，后面的代码不会执行
+                    // 2. 如果 map 不为空，并且 cls 确实是 remapped_class_map 中的 key，则 c2 就是取得的 value
+                    //      但是其中 key 如果是 ignored weak-linked class 的话，c2 就是 nil
     }
 }
 
+// 与上面的函数一样，只是参数类型是 classref_t
 static Class remapClass(classref_t cls)
 {
     return remapClass((Class)cls);
 }
 
+// 作用与上面一样，但是调用者比较特殊，所以在函数体里加了读锁
+// 调用者 ：_objc_exception_do_catch()
 Class _class_remap(Class cls)
 {
     rwlock_reader_t lock(runtimeLock);
@@ -1435,12 +1572,17 @@ Class _class_remap(Class cls)
 * or is an ignored weak-linked class.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+// fix-up 一个类引用，万一这个类引用指向的类已经被 reallocated(重新分配？) 或者它是一个 ignored weak-linked 类
+// clsref 是一个二级指针，它指向一个类的指针
+// 调用者 ：_read_images()
 static void remapClassRef(Class *clsref)
 {
     runtimeLock.assertLocked();
 
-    Class newcls = remapClass(*clsref);    
-    if (*clsref != newcls) *clsref = newcls;
+    Class newcls = remapClass(*clsref); // 用 *clsref 为 key 从重映射类表中取出新类
+    if (*clsref != newcls) { // 如果 *clsref 不等于新类，则将新类赋给 *clsref
+        *clsref = newcls;
+    }
 }
 
 
@@ -1456,13 +1598,13 @@ static void remapClassRef(Class *clsref)
  inst 是这个元类的实例 或者 这个元类的实例的子类，也可能是 nil
  inst 不是 nil 的话，会快一点
  这个方法被用在 +initialize 中（间接调用，其实是被 _class_getNonMetaClass 调用）
- runtimeLock 锁必须被调用者 read- or write-locked
 **********************************************************************/
 // 取得 metacls 的 nonMetaClass，每个元类都有一个实例类
 // http://7ni3rk.com1.z0.glb.clouddn.com/Runtime/class-diagram.jpg
-// 如果它已经不是 meta class，就直接返回它本身
-// 如果它是 meta class，就找它的实例类
+// 如果不是元类，就直接返回它本身
+// 如果它是元类，就找它的实例类
 // 静态方法，内部使用，不让外部调用
+// 调用者 ：_class_getNonMetaClass()
 static Class getNonMetaClass(Class metacls, id inst)
 {
     // 一些全局的变量
@@ -1487,22 +1629,22 @@ static Class getNonMetaClass(Class metacls, id inst)
     }
 
     // metacls really is a metaclass
-    // 如果 metacls 已经是一个 metaclass，就走下面的步骤
+    // 如果 metacls 已经是一个元类，就走下面的步骤
     
     // special case for root metaclass
     // where inst == inst->ISA() == metacls is possible
-    // 特殊情况，如果metacls 就是根元类，根元类的 isa->cls 是它自己
+    // 特殊情况，如果 metacls 就是根元类，根元类的 isa->cls 是它自己
     if (metacls->ISA() == metacls) {
-        // 取得根元类的父类，根元类的父类是 NSObject 类
-        Class cls = metacls->superclass;
-        // 如果 cls 到这里还没有 Realized，说明前面的步骤有错
-        assert(cls->isRealized());
-        // 如果 cls 是元类，说明有错，cls 是 NSObject，肯定不是元类
-        assert(!cls->isMetaClass());
-        // 如果 cls 的 isa->cls 不是根元类，说明前面的步骤有错
-        assert(cls->ISA() == metacls);
-        // 确认 cls 类 isa->cls 是 metacls，然后返回 cls，也就是 NSObject
-        if (cls->ISA() == metacls) {
+        
+        Class cls = metacls->superclass; // 取得根元类的父类，根元类的父类是 NSObject 类
+        
+        assert(cls->isRealized());     // 如果 cls 到这里还没有 Realized，说明前面的步骤有错
+        
+        assert(!cls->isMetaClass());   // 如果 cls 是元类，说明有错，cls 是 NSObject，肯定不是元类
+        
+        assert(cls->ISA() == metacls); // 如果 cls 的 isa->cls 不是根元类，说明前面的步骤有错
+        
+        if (cls->ISA() == metacls) {   // 确认 cls 类 isa->cls 是 metacls，然后返回 cls，也就是 NSObject
             return cls;
         }
     }
@@ -1510,10 +1652,12 @@ static Class getNonMetaClass(Class metacls, id inst)
     // use inst if available
     // 如果 inst 非空，就利用 inst 来查找，会快点
     if (inst) {
-        // 直接将 inst 转为 Class 类型，我靠，如果它不是 Class 类型怎么办
+        // 直接将 inst 转为 Class 类型
         Class cls = (Class)inst;
+        
         // realize cls
-        realizeClass(cls);
+        realizeClass(cls); // 将 cls 类 realize 了
+        
         // cls may be a subclass - find the real class for metacls
         // cls 可能是子类，向上一直找到 metacls 的 real class
         // 循环，直到 cls == nil , 或者 cls 的 isa->cls == metacls，
@@ -1541,9 +1685,9 @@ static Class getNonMetaClass(Class metacls, id inst)
   
     // try name lookup  试着通过名字查找
     {
-        // 看看 metacls 里存的 mangledName 是否是 metacls 的实例类
+        // 根据元类中的 mangledName 去 gdb_objc_realized_classes 中查找类
         Class cls = getClass(metacls->mangledName());
-        if (cls->ISA() == metacls) {
+        if (cls->ISA() == metacls) { // 如果这个 cls 的元类确实是 metacls 就将其 realize 后返回
             named++; // 计数，看总数里有多少次是通过 name 查找，成功找到的
             if (PrintInitializing) {
                 _objc_inform("INITIALIZE: %d/%d (%g%%) "
@@ -1556,15 +1700,8 @@ static Class getNonMetaClass(Class metacls, id inst)
         }
     }
 
-    // try secondary table 通过 secondary table 查找
+    // try secondary table 通过 secondary table (二级映射表)查找，有关 secondary table 见 nonMetaClasses()
     {
-        // objc-runtime-new.mm 中维护了一个 NXMapTable *nonmeta_class_map 的全局变量
-        // 对它的描述是：
-        //    This map does not contain all class and metaclass pairs. It only
-        //    contains metaclasses whose classes would be in the runtime-allocated
-        //    named-class table, but are not because some other class with
-        //    the same name is in that table.
-        //
         // 查找 nonmeta_class_map 看是否有 metacls 对应的实例类
         Class cls = (Class)NXMapGet(nonMetaClasses(), metacls);
         if (cls) {
@@ -1583,12 +1720,12 @@ static Class getNonMetaClass(Class metacls, id inst)
     }
 
     // try any duplicates in the dyld shared cache
-    // 通过 dyld shared cache 查找
+    // 通过 dyld shared cache 查找所有副本
     {
         Class cls = nil;
 
         int count; // 作为输入参数
-        // 通过 metacls->mangledName() 查出所有对应的预优化的类
+        // 通过 metacls->mangledName() 拷贝出所有对应的预优化的类
         Class *classes = copyPreoptimizedClasses(metacls->mangledName(),&count);
         // 如果 classes 数组确实有值
         if (classes) {
@@ -1635,12 +1772,17 @@ static Class getNonMetaClass(Class metacls, id inst)
 // 如果它是 meta class，就找它的实例类
 // obj 是这个元类的实例 或者 这个元类的实例的子类，也可能是 nil
 // obj 不是 nil 的话，会快一点
+// 调用者 ： _class_resolveClassMethod() / lookUpImpOrForward() /
+//            lookUpImpOrForward() / storeWeak<>()
 Class _class_getNonMetaClass(Class cls, id obj)
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // 加读锁
+    
     // 调用 getNonMetaClass 取得 cls 的实例类
     cls = getNonMetaClass(cls, obj);
-    assert(cls->isRealized());
+    
+    assert(cls->isRealized()); // cls 类必须是已经被 realized 的类
+    
     return cls;
 }
 
@@ -2123,7 +2265,13 @@ static Class realizeClass(Class cls)
     if (cls->isRealized()) {
         return cls;
     }
-    assert(cls == remapClass(cls));
+    
+    assert(cls == remapClass(cls)); // remapClass(cls) 得到的是 cls 对应的重映射类，
+                                    // 如果 cls 不存在于 remapped_class_map 映射表，得到的才是 cls 本身，
+                                    // 所以这里断言 cls == remapClass(cls) 就是看 cls 是否存在于 remapped_class_map 映射表
+                                    // 不存在，就是正确；存在，就是错误
+                                    // 不存在，则 cls 既不是 realized future class，也不是 ignored weak-linked class
+                                    // 见 remappedClasses()
 
     // fixme verify class is not in an un-dlopened part of the shared cache?
 

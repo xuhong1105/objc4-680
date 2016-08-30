@@ -329,6 +329,8 @@ int NXNextMapState(NXMapTable *table, NXMapState *state, const void **key, const
 * NXMapKeyCopyingInsert
 * Like NXMapInsert, but strdups the key if necessary.
 * Used to prevent stale pointers when bundles are unloaded.
+ 
+ 和 NXMapInsert 用处一样，但是会先在堆中复制 key
 **********************************************************************/
 void *NXMapKeyCopyingInsert(NXMapTable *table, const void *key, const void *value)
 {
@@ -349,6 +351,8 @@ void *NXMapKeyCopyingInsert(NXMapTable *table, const void *key, const void *valu
 * NXMapKeyFreeingRemove
 * Like NXMapRemove, but frees the existing key if necessary.
 * Used to prevent stale pointers when bundles are unloaded.
+ 
+ 与 NXMapRemove 功能一样，但是会释放 key，因为 key 是在堆中分配的，原因见 NXMapKeyCopyingInsert()
 **********************************************************************/
 void *NXMapKeyFreeingRemove(NXMapTable *table, const void *key)
 {

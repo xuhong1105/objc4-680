@@ -359,6 +359,15 @@ class spinlock_t {
 
 extern void _objc_fatal(const char *fmt, ...) __attribute__((noreturn, format (printf, 1, 2)));
 
+// 初始化一次 var 指针
+// 它循环调用 OSAtomicCompareAndSwapPtrBarrier，其中会查看二级指针 var 指向的值是否等于0，如果等于，就将 create 指向的值赋给 var，结束循环，否则继续尝试；
+// 结束循环后，调用 delete，将 create 销毁，#疑问：按照这个逻辑，是不可能走到 delete 的呀
+// OSAtomicCompareAndSwapPtrBarrier 函数原型：
+// bool	OSAtomicCompareAndSwapPtrBarrier( void *__oldValue, void *__newValue, void * volatile *__theValue );
+// 它比较并交换指针，用到了 barrier
+// 这个函数比较指针 oldValue 指向的旧值 和 指针 theValue 指向的内存中当前的值，如果一致，就将指针 newValue 指向的新值赋给 theValue 指向的内存，注意这里 theValue 是二级指针
+// 整个操作是原子性的。
+// 如果匹配上就返回 TRUE，否则返回 FALSE
 #define INIT_ONCE_PTR(var, create, delete)                              \
     do {                                                                \
         if (var) break;                                                 \

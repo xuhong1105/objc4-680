@@ -127,7 +127,8 @@ public:
 
 
 // classref_t is unremapped class_t*
-typedef struct classref * classref_t;
+typedef struct classref * classref_t; // classref_t 是 unremapped 的类 类型，其实与 Class / objc_class * 没有什么区别
+                                      // 只是专门用于 unremapped 的类
 
 #pragma mark - entsize_list_tt
 
@@ -1800,7 +1801,7 @@ struct objc_class : objc_object {
         return ISA() == (Class)this; // 根元类的 isa 指向自己
     }
 
-    // 取得 mangled（改编的）名称
+    // 取得 mangled（重整）名称
     // Name Mangling 是一种在编译过程中，将函数、变量的名称重新改编的机制。在 C++重载、namespace等操作符下，函数可以有同样的名字，编译器为了区分各个不同地方的函数，将各个函数通过编译器内定的算法，将函数改成唯一的名称。
     // 元类的 mangledName 存的可能是它的实例类，也就是它是这个叫 mangledName 的类的元类
     const char *mangledName() { 

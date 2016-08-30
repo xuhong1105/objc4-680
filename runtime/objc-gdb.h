@@ -66,6 +66,8 @@ OBJC_EXPORT Class gdb_object_getClass(id obj)
 #if __OBJC2__
 
 // Maps class name to Class, for in-use classes only. NXStrValueMapPrototype.
+// 这是一个误称 ：gdb_objc_realized_classes 事实上是一个装了不在 dyld shared cache 中的
+// named classes 的列表，无论是否是 realized 的
 OBJC_EXPORT NXMapTable *gdb_objc_realized_classes
     __OSX_AVAILABLE_STARTING(__MAC_10_6, __IPHONE_3_1);
 

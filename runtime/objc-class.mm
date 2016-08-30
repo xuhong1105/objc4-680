@@ -984,6 +984,7 @@ _class_createInstancesFromZone(Class cls, size_t extraBytes, void *zone,
 /***********************************************************************
 * inform_duplicate. Complain about duplicate class implementations.
 **********************************************************************/
+// 警告，名字为 name 的类有两份实现，但只有一份会被使用
 void 
 inform_duplicate(const char *name, Class oldCls, Class cls)
 {
