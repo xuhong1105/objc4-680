@@ -49,7 +49,7 @@ static int loadable_classes_used = 0;
 static int loadable_classes_allocated = 0;
 
 // List of categories that need +load called (pending parent class +load)
-static struct loadable_category *loadable_categories = nil;
+static struct loadable_category *loadable_categories = nil; // 需要执行 +load 的分类
 static int loadable_categories_used = 0;
 static int loadable_categories_allocated = 0;
 

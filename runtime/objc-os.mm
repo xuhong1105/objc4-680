@@ -705,6 +705,10 @@ map_images_nolock(enum dyld_image_states state, uint32_t infoCount,
 *
 * Locking: loadMethodLock(both) and runtimeLock(new) acquired by load_images
 **********************************************************************/
+// 准备 +load，将需要 +load 的类和分类分别存储到 loadable_classes、loadable_categories 中
+// 如果现在有 +load 方法可以供 call_load_methods() 函数调用，就返回 YES
+// 调用者：只有 load_images()
+// 需要 load_images() 函数中事先加上 loadMethodLock 递归锁 和 runtimeLock 写锁
 bool 
 load_images_nolock(enum dyld_image_states state,uint32_t infoCount,
                    const struct dyld_image_info infoList[])
@@ -713,10 +717,17 @@ load_images_nolock(enum dyld_image_states state,uint32_t infoCount,
     uint32_t i;
 
     i = infoCount;
+    
+    // 从后往前遍历 infoList 中所有镜像，如果镜像中有 +load 方法（其实只查找了镜像中是否有类或分类）
+    // 就对镜像调用 prepare_load_methods，
+    // 并且记录下有 +load 方法，只要有一个镜像有 +load ，就返回 YES
     while (i--) {
         const headerType *mhdr = (headerType*)infoList[i].imageLoadAddress;
         if (!hasLoadMethods(mhdr)) continue;
-
+        
+        // 为 +load 做一些准备工作
+        // 将需要 +load 的类添加到 loadable_classes 列表，
+        // 将需要 +load 的分类添加到 loadable_categories 列表
         prepare_load_methods(mhdr);
         found = YES;
     }
@@ -830,10 +841,16 @@ void _objc_init(void)
     exception_init();
     
     // Register for unmap first, in case some +load unmaps something
+    // 首先第一步，注册 unmap 函数，万一有的类的 +load 方法需要 unmap 一些东西
+    // unmap，即 un-memory-mapped，这里应该就是取消内存映射，移除镜像的意思
     _dyld_register_func_for_remove_image(&unmap_image);
     
+    // 注册镜像状态改变时的回调函数
     dyld_register_image_state_change_handler(dyld_image_state_bound,
-                                             1/*batch*/, &map_2_images);
+                                             1/*batch 是否批处理*/, &map_2_images);
+    
+    // 注册镜像状态改变时的回调函数，镜像加载完成后，需要调用 +load 时会回调 load_images 函数
+    // 不进行批处理，所以 load_images 会被调用多次，每次有新的镜像进来时，都会被调用
     dyld_register_image_state_change_handler(dyld_image_state_dependents_initialized, 0/*not batch*/, &load_images);
 }
 

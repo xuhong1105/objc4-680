@@ -2715,8 +2715,8 @@ map_2_images(enum dyld_image_states state, uint32_t infoCount,
 *
 * Locking: write-locks runtimeLock and loadMethodLock
 **********************************************************************/
-// 加载镜像，
-// 处理镜像中的 +load 方法，这些镜像被 dyld 库映射
+// 加载镜像（这个函数会被调用多次，每次有新的镜像加载进来，都会回调这个函数）
+// 处理镜像中的 +load 方法，这些镜像被 dyld 库映射，
 // 这个函数和 map_2_images 一样，也是一个回调函数，被 dyld 库调用，
 // 参数中的镜像信息也是 dyld 库传进来的，详情见 _objc_init()
 // 如果在镜像中找到 +load 方法，会调用 call_load_methods 调用这些 +load 方法（说“这些”，因为有很多类）
@@ -2728,28 +2728,47 @@ load_images(enum dyld_image_states state, uint32_t infoCount,
     bool found;
 
     // Return without taking locks if there are no +load methods here.
+    
+    // 遍历镜像列表，查看镜像中是否存在 +load 方法
+    // 有一个镜像中存在，就停止遍历
+    // 整个过程不加锁
     found = false;
     for (uint32_t i = 0; i < infoCount; i++) {
+        // 快速扫描镜像中是否有 +load 方法 (其实只查找了镜像中是否有类或分类）
+        // imageLoadAddress 是镜像加载的内存地址
         if (hasLoadMethods((const headerType *)infoList[i].imageLoadAddress)) {
             found = true;
             break;
         }
     }
-    if (!found) return nil;
+    if (!found) return nil; // 如果没有找到，就直接返回 nil
 
     recursive_mutex_locker_t lock(loadMethodLock); // loadMethodLock 递归互斥锁加锁
-                                                   // 递归锁在同一线程上是可重入的，在不同线程上与普通互斥锁没有区别
-                                                   // 可重入，就是同一线程上可以多次加锁，比如递归的时候
-                                                   // 解锁与加锁的次数必须相同，加锁几次，就必须解锁几次
+                                // 递归锁在同一线程上是可重入的，在不同线程上与普通互斥锁没有区别
+                                // 可重入，就是同一线程上可以多次加锁，比如递归的时候
+                                // 解锁与加锁的次数必须相同，加锁几次，就必须解锁几次
+                                // 因为 load_images 中调用 +load 时，会导致其他镜像被 load，
+                                // load_images 函数会在一个线程上被接连调用多次，如果不用递归锁的话，就会死锁
+    
     // Discover load methods
-    {
-        rwlock_writer_t lock2(runtimeLock);
+    { // 加上括号，是为了 runtimeLock 锁，可以在这个块内自动释放，否则下次重入该函数时，会死锁
+        
+        rwlock_writer_t lock2(runtimeLock); // runtimeLock 加写锁
+        
+        // 做一些准备工作，将需要 +load 的类和分类分别存储到 loadable_classes、loadable_categories 中，
+        // 在 call_load_methods() 中才有类可以调 +load
+        // 并进一步确认是否真的有类或分类需要调用 +load
         found = load_images_nolock(state, infoCount, infoList);
     }
 
-    // Call +load methods (without runtimeLock - re-entrant)  不加 runtimeLock 锁，可重入，#疑问：什么意思？？
-    if (found) {
-        call_load_methods(); // 调用 +load
+    // Call +load methods (without runtimeLock - re-entrant)
+    
+    // 不加 runtimeLock 锁，是因为 runtimeLock 与递归锁不一样，它是不可重入的，
+    // 因为 load_images 中调用 +load 时，会导致其他镜像被 load，
+    // 即 load_images 函数会在一个线程上被接连调用多次，如果加上 runtimeLock，就会造成死锁
+    
+    if (found) { // 确实有类或分类需要 +load
+        call_load_methods(); // 就调用 +load
     }
 
     return nil;
@@ -3357,49 +3376,73 @@ void _read_images(header_info **hList, uint32_t hCount)
 **********************************************************************/
 // Recursively schedule +load for cls and any un-+load-ed superclasses.
 // cls must already be connected.
+// 为 cls 安排 +load，就是将类添加到 loadable_classes 列表中，
+// 函数中会首先递归向上遍历 cls 的祖宗类，直到某个祖宗类是已经被加载过的，或者直到根类
+// 保证 loadable_classes 列表中，父类在前，子类在后，父类的 +load 先被调用
 static void schedule_class_load(Class cls)
 {
-    if (!cls) return;
-    assert(cls->isRealized());  // _read_images should realize
+    if (!cls) return; // cls 为 nil，这会出现在根类的时候，结束递归
+    
+    assert(cls->isRealized());  // cls 必须已经是 realize 的，即 realize 在 load 之前，
+                                // realize 是在 _read_images() 中做的
 
-    if (cls->data()->flags & RW_LOADED) return;
+    if (cls->data()->flags & RW_LOADED) return; // 如果该类已经被 load 过了，就直接返回，结束递归
 
     // Ensure superclass-first ordering
-    schedule_class_load(cls->superclass);
+    schedule_class_load(cls->superclass); // 递归，确保在 loadable_classes 列表中父类排在前面
 
-    add_class_to_loadable_list(cls);
-    cls->setInfo(RW_LOADED); 
+    add_class_to_loadable_list(cls); // 将 cls 类添加到 loadable_classes 列表中
+    
+    cls->setInfo(RW_LOADED); // 将 cls 类设置为已经 load
 }
 
 // Quick scan for +load methods that doesn't take a lock.
+// 快速扫描镜像中是否有 +load 方法，整个过程不加锁
+// 调用者：load_images() / load_images_nolock()
 bool hasLoadMethods(const headerType *mhdr)
 {
     size_t count;
+    // 扫描类列表
     if (_getObjc2NonlazyClassList(mhdr, &count)  &&  count > 0) return true;
+    // 扫描分类列表
     if (_getObjc2NonlazyCategoryList(mhdr, &count)  &&  count > 0) return true;
+    
+    // #疑问：真是让人费解啊，完全没有地方在检查 +load 方法嘛，难道说只要有类或者分类，就一定有 +load 方法？？
+    
     return false;
 }
 
+// 为加载方法（调用 +load）做一些准备工作，
+// 遍历所有类，按父类在前子类在后的顺序，将所有未 load 的类及其未 load 的祖宗类们添加到 loadable_classes 列表中，
+// 遍历所有分类，将分类所属的类 realize 后，把分类添加到 loadable_categories 列表中，
+// 调用者：load_images_nolock()
 void prepare_load_methods(const headerType *mhdr)
 {
     size_t count, i;
 
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 需要事先加好写锁（是在 load_images() 中加的锁）
 
-    classref_t *classlist = 
-        _getObjc2NonlazyClassList(mhdr, &count);
+    // 获得镜像中所有 objective-2.0 且是非惰性的 类的 列表
+    classref_t *classlist = _getObjc2NonlazyClassList(mhdr, &count);
+    
+    // 遍历类列表，先取得重映射的类，然后调用 schedule_class_load 函数将其添加到 loadable_classes 列表中
     for (i = 0; i < count; i++) {
         schedule_class_load(remapClass(classlist[i]));
     }
 
+    // 取得分类列表
     category_t **categorylist = _getObjc2NonlazyCategoryList(mhdr, &count);
+    
+    // 遍历分类列表
     for (i = 0; i < count; i++) {
         category_t *cat = categorylist[i];
-        Class cls = remapClass(cat->cls);
+        Class cls = remapClass(cat->cls); // 取得 分类所属的类 所对应的 重映射类
         if (!cls) continue;  // category for ignored weak-linked class
-        realizeClass(cls);
-        assert(cls->ISA()->isRealized());
-        add_category_to_loadable_list(cat);
+                             // cls == nil，即 cat->cls 是 ignored weak-linked 类，就跳过
+        realizeClass(cls);  // 将 cls 类 realize 了，里面当然也会一并 realize 了 cls 的祖宗类和元类
+        assert(cls->ISA()->isRealized()); // 确认 realizeClass 是否已经将 cls 的元类也一并 realize 了，
+                                          // 见 realizeClass()
+        add_category_to_loadable_list(cat); // 将分类 cat 添加到 loadable_categories 列表中
     }
 }
 
