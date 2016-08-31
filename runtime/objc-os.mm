@@ -573,8 +573,9 @@ static const char *gc_enforcer(enum dyld_image_states state,
 #endif
 
 
-// 在这个函数中，完成的所有 class 的注册、fixup等工作，并且调用 +load 方法
+// 映射镜像，在这个函数中，完成所有 class 的注册、fixup等工作，
 // 还包括初始化自动释放池、初始化 side table 等工作
+// 调用者 map_2_images()
 const char *
 map_images_nolock(enum dyld_image_states state, uint32_t infoCount,
                   const struct dyld_image_info infoList[])
@@ -810,6 +811,8 @@ static void static_init()
 * New ABI: called by libSystem BEFORE library initialization time
 **********************************************************************/
 
+// 这个函数算是整个 objc4 库的入口函数，被 libSystem 库调用
+
 #if !__OBJC2__
 static __attribute__((constructor))
 #endif
@@ -828,7 +831,7 @@ void _objc_init(void)
     
     // Register for unmap first, in case some +load unmaps something
     _dyld_register_func_for_remove_image(&unmap_image);
-    // 编译不过，暂时注释
+    
     dyld_register_image_state_change_handler(dyld_image_state_bound,
                                              1/*batch*/, &map_2_images);
     dyld_register_image_state_change_handler(dyld_image_state_dependents_initialized, 0/*not batch*/, &load_images);

@@ -821,9 +821,9 @@ void instrumentObjcMessageSends(BOOL flag)
         return;
 
     // If enabling, flush all method caches so we get some traces
-    if (enable)
-        _objc_flush_caches(Nil);
-
+    if (enable) {
+        _objc_flush_caches(Nil); // 如果 flag == trye 就清空垃圾桶，并强制释放内存
+    }
     // Sync our log file
     if (objcMsgLogFD != -1)
         fsync (objcMsgLogFD);
@@ -842,6 +842,7 @@ Class _calloc_class(size_t size)
     if (UseGC) return (Class) malloc_zone_calloc(gc_zone, 1, size);
 #endif
     // 绝大多数正常的情况，直接调用 calloc 分配 size 大小的内存
+    // calloc 会自动将这块内存初始化为 0
     return (Class) calloc(1, size);
 }
 

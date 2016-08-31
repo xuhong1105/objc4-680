@@ -356,8 +356,9 @@ struct ivar_t {
     uint32_t alignment_raw; // 对齐
     uint32_t size;  // 成员变量占多少内存
 
-    // 取得对齐，因为 alignment_raw 有时为 -1
-    // alignment() 会进行纠正，返回正确的值
+    // 取得对齐的值（即以多少字节对齐），因为 alignment_raw 有时为 -1，alignment() 会进行纠正，返回正确的值
+    // 在 moveIvars() 和 reconcileInstanceVariables() 有用到
+    // 用于遍历类的所有成员变量，哪个成员变量的 alignment 最大，类的所有成员变量们以它的 alignment 进行对齐布局
     uint32_t alignment() const {
         if (alignment_raw == ~(uint32_t)0) {
             return 1U << WORD_SHIFT;
@@ -407,6 +408,7 @@ struct property_list_t : entsize_list_tt<property_t, property_list_t, 0> { // fl
 #pragma mark - protocol_t
 
 typedef uintptr_t protocol_ref_t;  // protocol_t *, but unremapped
+                                   // 与 protocol_t * 一模一样，但是用于未重映射的协议
 
 // Values for protocol_t->flags
 // protocol_t->flags 里存的值
@@ -417,9 +419,9 @@ typedef uintptr_t protocol_ref_t;  // protocol_t *, but unremapped
 
 // 协议结构体，继承自 objc_object
 struct protocol_t : objc_object {
-    const char *mangledName;   // 改编后的协议名称
+    const char *mangledName;   // 重整后的协议名称
                         // Name Mangling 是一种在编译过程中，将函数、变量的名称重新改编的机制。在 C++重载、namespace等操作符下，函数可以有同样的名字，编译器为了区分各个不同地方的函数，将各个函数通过编译器内定的算法，将函数改成唯一的名称。
-    struct protocol_list_t *protocols;  // 存疑，难道存的是属于哪个协议列表？
+    struct protocol_list_t *protocols;  // #疑问：存的是属于哪个协议列表？
     method_list_t *instanceMethods;  // 实例方法
     method_list_t *classMethods;   // 类方法
     method_list_t *optionalInstanceMethods; // 可选的实例方法
@@ -431,9 +433,9 @@ struct protocol_t : objc_object {
     uint32_t flags;  // 标记 跟 PROTOCOL_FIXED_UP_1 / PROTOCOL_FIXED_UP_2 有关系
     // Fields below this point are not always present on disk.
     const char **extendedMethodTypes;
-    const char *_demangledName;
+    const char *_demangledName; // 重整前的名字
 
-    const char *demangledName();
+    const char *demangledName(); // 取得重整前的协议名称
 
     const char *nameForLogging() {
         return demangledName();
@@ -1221,7 +1223,7 @@ struct class_rw_t {
     
     uint32_t flags; // 存了是否有 C++ 构造器、C++ 析构器、默认 allocWithZone 等信息
     
-    uint32_t version; // 版本
+    uint32_t version; // 版本，元类是 7，普通类是 0
 
     const class_ro_t *ro; // 一个指向常量的指针，其中存储了当前类在编译期就已经确定的属性、方法以及遵循的协议
 

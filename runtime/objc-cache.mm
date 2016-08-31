@@ -599,6 +599,7 @@ void cache_t::reallocate(mask_t oldCapacity, mask_t newCapacity)
     // 不拷贝到新的 bucket 数组 ？？？
     // 看来看去，好像真的没有做这步，可能是 _mask 变了，即使拷贝了，cache_hash() 函数中，
     // 用新的 _mask 进行 hash 时，拿到的 key 也是错的，索性全都不要了，重新缓存
+    // 2016.8.31 更新：确实如此！！！
     
     // 如果需要释放
     if (freeOld) {
@@ -1066,6 +1067,7 @@ static void cache_collect_free(bucket_t *data, mask_t capacity)
 * Cache locks: cacheUpdateLock must be held by the caller.
 **********************************************************************/
 // 清空垃圾桶，参数 collectALot 是是否强制地释放内存
+// 调用者：_objc_flush_caches() / cache_erase_nolock() / cache_erase_nolock()
 void cache_collect(bool collectALot)
 {
     // 判断 cacheUpdateLock 有没有被正确地加锁

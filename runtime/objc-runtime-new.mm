@@ -933,7 +933,7 @@ static NXMapTable *nonMetaClasses(void)
     if (nonmeta_class_map) return nonmeta_class_map; // 如果非空就直接返回
 
     // nonmeta_class_map is typically small
-    // 空的话，就创建一个
+    // INIT_ONCE_PTR 会进行判断，如果空的话，就创建一个
     INIT_ONCE_PTR(nonmeta_class_map, 
                   NXCreateMapTable(NXPtrValueMapPrototype, 32), 
                   NXFreeMapTable(v));
@@ -1527,7 +1527,7 @@ static void addRemappedClass(Class oldcls, Class newcls)
 * Returns nil if cls is ignored because of weak linking.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
-// 返回 cls 类的 live class（活动的类）指针，这个指针可能指向一个已经被 reallocated 的类结构体（#疑问：什么意思？？）
+// 返回 cls 类的 live class（活动的类）指针，这个指针可能指向一个已经被 reallocated 的结构体（#疑问：什么意思？？）
 // 若 cls 是 weak linking（弱连接），则 cls 会被忽略，而返回 nil
 // 好拗口，这个函数其实就是从 remapped_class_map 以 cls 为 key ，取出 realized 后的 future class
 // 调用者 ：_class_remap() / missingWeakSuperclass() / realizeClass() /
@@ -1792,16 +1792,33 @@ Class _class_getNonMetaClass(Class cls, id obj)
 * Adds subcls as a subclass of supercls.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 给 supercls 类添加一个子类 subcls
+// 调用者：objc_duplicateClass() / objc_initializeClassPair_internal() /
+//         realizeClass() / setSuperclass()
 static void addSubclass(Class supercls, Class subcls)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // 需要事先加写锁
 
     if (supercls  &&  subcls) {
-        assert(supercls->isRealized());
+        assert(supercls->isRealized()); // 父类和子类都必须已经被 realized
         assert(subcls->isRealized());
+        // 类的继承是多叉树的结构，所以先将 subcls 的 nextSiblingClass 指针指向 supercls 的 firstSubclass
+        // 即 subcls 的兄弟类是 supercls 的第一个子类
         subcls->data()->nextSiblingClass = supercls->data()->firstSubclass;
+        // 然后将 subcls 设为 supercls 的第一个子类
         supercls->data()->firstSubclass = subcls;
 
+        /* 如下图
+         
+                 supercls
+              /     |      \
+            ↓/      |       \
+        subcls -> subcls2 -> subcls3 -> nil    子类是一个链表
+         
+         */
+        
+        // 子类是否有 C++构造器、C++析构器、自定义 RR、自定义 AWZ 都是继承自父类，与父类保持一致
+        
         if (supercls->hasCxxCtor()) {
             subcls->setHasCxxCtor();
         }
@@ -1830,20 +1847,30 @@ static void addSubclass(Class supercls, Class subcls)
 * Removes subcls as a subclass of supercls.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 移除 supercls 的子类 subcls
+// 调用者：detach_class() / setSuperclass()
 static void removeSubclass(Class supercls, Class subcls)
 {
     runtimeLock.assertWriting();
-    assert(supercls->isRealized());
+    assert(supercls->isRealized()); // 父类和子类必须是已经被 realized 的，这不是废话么，添加子类的时候已经检查过了呀
     assert(subcls->isRealized());
-    assert(subcls->superclass == supercls);
+    assert(subcls->superclass == supercls); // subcls 必须确实是 supercls 的子类
 
     Class *cp;
-    for (cp = &supercls->data()->firstSubclass; 
-         *cp  &&  *cp != subcls; 
+    for (cp = &supercls->data()->firstSubclass; // cp 首先指向 supercls 的第一个子类，然后沿着子类的链表一路寻找，
+                                                // 直到找到 subcls 类
+         *cp  &&  *cp != subcls;
          cp = &(*cp)->data()->nextSiblingClass)
         ;
     assert(*cp == subcls);
-    *cp = subcls->data()->nextSiblingClass;
+    *cp = subcls->data()->nextSiblingClass; // 将 subcls 的下一个兄弟类赋给 *cp，即 下一个兄弟类代替了 subcls 的位置
+                                            // subcls 在这里不能被销毁，因为其他地方也存了它，
+                                            // 所以还有很多操作要做，见 detach_class()
+    
+                                    // 如下图，就是单纯的链表移除元素的操作
+                                    // A  ->  B  ->  C  ->  D  ->  nil
+                                    //        |             ↑
+                                    //        ---------------
 }
 
 
@@ -1853,12 +1880,16 @@ static void removeSubclass(Class supercls, Class subcls)
 * Returns the protocol name => protocol map for protocols.
 * Locking: runtimeLock must read- or write-locked by the caller
 **********************************************************************/
+// 获得 协议名 -> 协议 的映射表
+// 调用者：_read_images() / getProtocol() / objc_copyProtocolList() / objc_registerProtocol()
 static NXMapTable *protocols(void)
 {
-    static NXMapTable *protocol_map = nil;
+    static NXMapTable *protocol_map = nil; // 存储 协议名 -> 协议 映射的数据结构
     
     runtimeLock.assertLocked();
 
+    // 有关 INIT_ONCE_PTR 见 nonMetaClasses()，里面也用到了
+    // INIT_ONCE_PTR 会进行判断，如果空的话，就创建一个
     INIT_ONCE_PTR(protocol_map, 
                   NXCreateMapTable(NXStrValueMapPrototype, 16), 
                   NXFreeMapTable(v) );
@@ -1872,18 +1903,22 @@ static NXMapTable *protocols(void)
 * Looks up a protocol by name. Demangled Swift names are recognized.
 * Locking: runtimeLock must be read- or write-locked by the caller.
 **********************************************************************/
+// 从 protocol_map 中根据协议名 name 查找对应的协议
 static Protocol *getProtocol(const char *name)
 {
     runtimeLock.assertLocked();
 
     // Try name as-is.
+    // 先用直接用 name 查找
     Protocol *result = (Protocol *)NXMapGet(protocols(), name);
     if (result) return result;
 
     // Try Swift-mangled equivalent of the given name.
+    // 如果 name 找不到，那么可能这是一个 swift 的协议，就将其重整为 swift 协议的格式
+    // 如果不符合 swift 重整前名字的格式的话，copySwiftV1MangledName 会返回 nil
     if (char *swName = copySwiftV1MangledName(name, true/*isProtocol*/)) {
-        result = (Protocol *)NXMapGet(protocols(), swName);
-        free(swName);
+        result = (Protocol *)NXMapGet(protocols(), swName);  // 用 swName 再查找一次
+        free(swName);  // 将 swName 释放，原因见 copySwiftV1MangledName()
         return result;
     }
 
@@ -1897,13 +1932,16 @@ static Protocol *getProtocol(const char *name)
 * a protocol struct that has been reallocated.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+// 获得重映射的协议，protocol_ref_t 是未重映射的协议类型（其实和 protocol_t * 一样）
+// 调用者：太多了，不写了
 static protocol_t *remapProtocol(protocol_ref_t proto)
 {
     runtimeLock.assertLocked();
 
+    // 先取得 proto 重整后的名字，然后用这个名字查找对应的新协议
     protocol_t *newproto = (protocol_t *)
         getProtocol(((protocol_t *)proto)->mangledName);
-    return newproto ? newproto : (protocol_t *)proto;
+    return newproto ? newproto : (protocol_t *)proto; // 如果存在新协议，就返回，否则依然返回 proto
 }
 
 
@@ -1912,15 +1950,19 @@ static protocol_t *remapProtocol(protocol_ref_t proto)
 * Fix up a protocol ref, in case the protocol referenced has been reallocated.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
-static size_t UnfixedProtocolReferences;
+static size_t UnfixedProtocolReferences; // 记录 unfixed 协议的数量
+
+// fix-up 一个协议的引用（指向协议指针的二级指针），以防这个协议已经被 reallocated 了
+// 调用者：_read_images()
 static void remapProtocolRef(protocol_t **protoref)
 {
     runtimeLock.assertLocked();
 
+    // 调用 remapProtocol，获得 *protoref 协议 被重映射后的 新协议
     protocol_t *newproto = remapProtocol((protocol_ref_t)*protoref);
-    if (*protoref != newproto) {
+    if (*protoref != newproto) { // 如果 *protoref 与新协议不一致，就将新协议赋给 *protoref
         *protoref = newproto;
-        UnfixedProtocolReferences++;
+        UnfixedProtocolReferences++; // unfixed 的协议数量加 1
     }
 }
 
@@ -1931,19 +1973,28 @@ static void remapProtocolRef(protocol_t **protoref)
 * Also slides ivar and weak GC layouts if provided.
 * Ivars are NOT compacted to compensate for a superclass that shrunk.
 * Locking: runtimeLock must be held by the caller.
+ 
+ 调整一个类的成员变量的偏移量 以适应父类的大小，有时父类插入了新的成员变量，子类的成员变量就需要动态地偏移，
+ 但是需要明确的是，它只改变了成员变量中记录的偏移量，即编译期写的偏移量有可能是错的，这里只重新记录了它在结构体中的位置，
+ 这样的好处是，偏移量不必在编译器中写死；
+ #疑问：成员变量的真实位置会改变吗？？ivarBitmap 究竟是干嘛的，看字面意思，好像是改变了内存布局
+ Also slides ivar and weak GC layouts if provided. #疑问：难以理解
+ 成员变量并不会因为父类的压缩而压缩自身的大小（难道意思是如果是父类减少成员变量，子类不必调整？）
+ 调用者：reconcileInstanceVariables()
 **********************************************************************/
-static void moveIvars(class_ro_t *ro, uint32_t superSize, 
+static void moveIvars(class_ro_t *ro, uint32_t superSize, /*父类的大小*/
                       layout_bitmap *ivarBitmap, layout_bitmap *weakBitmap)
 {
     runtimeLock.assertWriting();
 
     uint32_t diff;
 
-    assert(superSize > ro->instanceStart);
-    diff = superSize - ro->instanceStart;
+    assert(superSize > ro->instanceStart); // superSize 必须大于 ro 的起点，即 superclass 排前面
+    diff = superSize - ro->instanceStart; // superclass 到 ro 起点的距离
 
-    if (ro->ivars) {
+    if (ro->ivars) { // 如果 ro 中有成员变量
         // Find maximum alignment in this class's ivars
+        // 遍历所有成员变量，找到最大的 alignment
         uint32_t maxAlignment = 1;
         for (const auto& ivar : *ro->ivars) {
             if (!ivar.offset) continue;  // anonymous bitfield
@@ -1953,15 +2004,17 @@ static void moveIvars(class_ro_t *ro, uint32_t superSize,
         }
 
         // Compute a slide value that preserves that alignment
+        // 然后根据最大的 alignment 计算所需要 slide 的值
         uint32_t alignMask = maxAlignment - 1;
         if (diff & alignMask) diff = (diff + alignMask) & ~alignMask;
 
         // Slide all of this class's ivars en masse
+        // 遍历所有成员变量，计算出每个成员变量新的偏移量
         for (const auto& ivar : *ro->ivars) {
-            if (!ivar.offset) continue;  // anonymous bitfield
+            if (!ivar.offset) continue;  // anonymous bitfield #疑问：原来没有偏移量？什么意思？
 
-            uint32_t oldOffset = (uint32_t)*ivar.offset;
-            uint32_t newOffset = oldOffset + diff;
+            uint32_t oldOffset = (uint32_t)*ivar.offset; // 旧的偏移量
+            uint32_t newOffset = oldOffset + diff; // slide 到新的偏移量位置
             *ivar.offset = newOffset;
 
             if (PrintIvars) {
@@ -1971,6 +2024,8 @@ static void moveIvars(class_ro_t *ro, uint32_t superSize,
                              ivar.size, ivar.alignment());
             }
         }
+        
+        // #疑问：下面完全看不懂
 
         // Slide GC layouts
         uint32_t oldOffset = ro->instanceStart;
@@ -2005,27 +2060,32 @@ static void moveIvars(class_ro_t *ro, uint32_t superSize,
 * Look up an ivar by name.
 * Locking: runtimeLock must be read- or write-locked by the caller.
 **********************************************************************/
+// 在 cls 类中查找 name 对应的成员变量（在 ro 中查找）
+// 调用者 ：_class_getVariable() / class_addIvar()
 static ivar_t *getIvar(Class cls, const char *name)
 {
     runtimeLock.assertLocked();
 
     const ivar_list_t *ivars;
-    assert(cls->isRealized());
-    if ((ivars = cls->data()->ro->ivars)) {
-        for (auto& ivar : *ivars) {
+    
+    assert(cls->isRealized()); // 类必须已经是已经 realized 的
+    
+    if ((ivars = cls->data()->ro->ivars)) { // 如果有成员变量
+        for (auto& ivar : *ivars) { // 就遍历成员变量列表
             if (!ivar.offset) continue;  // anonymous bitfield
 
             // ivar.name may be nil for anonymous bitfields etc.
-            if (ivar.name  &&  0 == strcmp(name, ivar.name)) {
+            if (ivar.name  &&  0 == strcmp(name, ivar.name)) { // 找到名字为 name 的成员变量，将其返回
                 return &ivar;
             }
         }
     }
 
-    return nil;
+    return nil; // 找不到的话，返回 nil
 }
 
-
+// 调整 cls 类的成员变量
+// #疑问：太难懂，以后再回来看
 static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro_t*& ro) 
 {
     class_rw_t *rw = cls->data();
@@ -2161,20 +2221,29 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
                                      ro->instanceSize, YES);
         }
     }
-
+    
+    // 当子类的 instanceStart 小于父类的 instanceSize 时,说明需要调整
     if (ro->instanceStart < super_ro->instanceSize) {
         // Superclass has changed size. This class's ivars must move.
         // Also slide layout bits in parallel.
         // This code is incapable of compacting the subclass to 
         //   compensate for a superclass that shrunk, so don't do that.
+        
+        // 父类的大小改变了，该类的成员变量必须移动，layout bits 也需要移动
+        // 这段代码在父类压缩的时候，并不会压缩子类的大小
+        
         if (PrintIvars) {
             _objc_inform("IVARS: sliding ivars for class %s "
                          "(superclass was %u bytes, now %u)", 
                          cls->nameForLogging(), ro->instanceStart, 
                          super_ro->instanceSize);
         }
+        
+        // 重新为 rw->ro 在堆中分配空间，使其可写
         class_ro_t *ro_w = make_ro_writeable(rw);
         ro = rw->ro;
+        
+        // 重新计算成员变量的偏移量
         moveIvars(ro_w, super_ro->instanceSize, 
                   mergeLayouts ? &ivarBitmap : nil, 
                   mergeLayouts ? &weakBitmap : nil);
@@ -2237,6 +2306,7 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
  从编译期的只有 RO，变成一个真正的可以用的类，
  函数中会将它的父类和元类也 realize 了，
  当然这会造成递归，会把 cls 往上所有没 realize 的祖宗类和 cls 的元类往上所有没有被 realize 的元类都 realize 了
+ 这个函数还会调用 methodizeClass 函数将分类中的方法列表、属性列表、协议列表加载到 methods、 properties 和 protocols 列表数组中
  
  调用本函数的函数有：
     _read_images()
@@ -2300,9 +2370,10 @@ static Class realizeClass(Class cls)
         cls->setData(rw); // 将新的 rw 替换老的 rw
     }
 
-    isMeta = ro->flags & RO_META;
+    isMeta = ro->flags & RO_META; // cls 类是否是元类
 
     rw->version = isMeta ? 7 : 0;  // old runtime went up to 6
+                            // 版本，元类是 7，普通类是 0
 
     if (PrintConnecting) {
         _objc_inform("CLASS: realizing class '%s' %s %p %p", 
@@ -2312,30 +2383,39 @@ static Class realizeClass(Class cls)
 
     // Realize superclass and metaclass, if they aren't already.
     // This needs to be done after RW_REALIZED is set above, for root classes.
+    
+    // remapClass() 函数是如果参数是一个已经 realized 的 future 类，则返回的是新类，否则返回的是自己
+    // 查看 cls 的父类对应的重映射的类，将其 realize 了
     supercls = realizeClass(remapClass(cls->superclass));
+    // 查看 cls 的元类对应的重映射的类，将其 realize 了
     metacls = realizeClass(remapClass(cls->ISA()));
 
     // Update superclass and metaclass in case of remapping
-    cls->superclass = supercls;
-    cls->initClassIsa(metacls);
+    cls->superclass = supercls; // 更新 cls 的父类
+    cls->initClassIsa(metacls); // 和元类
 
     // Reconcile instance variable offsets / layout.
     // This may reallocate class_ro_t, updating our ro variable.
-    if (supercls  &&  !isMeta) reconcileInstanceVariables(cls, supercls, ro);
+    if (supercls  &&  !isMeta) { // 根据父类，调整 cls 类 ro 中实例变量的偏移量和布局
+                                 // 可能重新分配 class_ro_t，更新 ro
+        reconcileInstanceVariables(cls, supercls, ro);
+    }
 
     // Set fastInstanceSize if it wasn't set already.
-    cls->setInstanceSize(ro->instanceSize);
+    cls->setInstanceSize(ro->instanceSize); // 设置成员变量的新的大小
 
     // Copy some flags from ro to rw
-    if (ro->flags & RO_HAS_CXX_STRUCTORS) {
-        cls->setHasCxxDtor();
-        if (! (ro->flags & RO_HAS_CXX_DTOR_ONLY)) {
+    // 从 ro 拷贝一些 flag 到 rw 中，可能是为了加快查找速度
+    if (ro->flags & RO_HAS_CXX_STRUCTORS) { // 是否有 C++ 构造器/析构器
+        cls->setHasCxxDtor(); // 设置有 C++ 析构器
+        if (! (ro->flags & RO_HAS_CXX_DTOR_ONLY)) { // 不只有 C++ 析构器，那么就是也有 C++ 构造器，真绕啊
             cls->setHasCxxCtor();
         }
     }
 
     // Disable non-pointer isa for some classes and/or platforms.
-#if SUPPORT_NONPOINTER_ISA
+#if SUPPORT_NONPOINTER_ISA  // 如果当前是支持 non-pointer isa 的，就根据环境变量看是否需要禁止 non-pointer isa，
+                            // 而是将类和所有子类都设为必须使用 raw isa
     {
         bool disable = false;
         static bool hackedDispatch = false;
@@ -2363,14 +2443,14 @@ static Class realizeClass(Class cls)
         addSubclass(supercls, cls);
     }
 
-    // 调用 methodizeClass 函数来将分类中的方法、属性、协议加载到 methods、 properties 和 protocols 列表中
+    // 调用 methodizeClass 函数来将分类中的方法列表、属性列表、协议列表加载到 methods、 properties 和 protocols 列表数组中
     // Attach categories
     methodizeClass(cls);
 
-    if (!isMeta) {
-        addRealizedClass(cls);
+    if (!isMeta) { // 如果不是元类
+        addRealizedClass(cls); // 就把它添加到 realized_class_hash 哈希表中
     } else {
-        addRealizedMetaclass(cls);
+        addRealizedMetaclass(cls); // 否则是元类，就把它添加到 realized_metaclass_hash 哈希表中
     }
 
     return cls;
@@ -2381,22 +2461,29 @@ static Class realizeClass(Class cls)
 * missingWeakSuperclass
 * Return YES if some superclass of cls was weak-linked and is missing.
 **********************************************************************/
+// 判断 cls 类的祖宗类中是否有类是 weak-linked 的，并且已经 missing(丢失？？)
+// 这是一个递归函数
+// 调用者：readClass()
 static bool 
 missingWeakSuperclass(Class cls)
 {
-    assert(!cls->isRealized());
+    assert(!cls->isRealized()); // cls 不能是已经 realized 的类，因为 realized 的类一定是正常的
 
-    if (!cls->superclass) {
+    if (!cls->superclass) { // 如果没有父类，则看它是否是根类，若是根类，那么就是正常的，否则它的父类就是丢了 = =
+                            // 结束递归
         // superclass nil. This is normal for root classes only.
         return (!(cls->data()->flags & RO_ROOT));
     } else {
         // superclass not nil. Check if a higher superclass is missing.
-        Class supercls = remapClass(cls->superclass);
-        assert(cls != cls->superclass);
+        // 如果有父类，则递归调用一直向上查找祖宗类，看是否有丢的了
+        Class supercls = remapClass(cls->superclass); // 取得重映射的父类，如果父类是 weak-link 的，
+                                                      // 则 remapClass 会返回 nil
+        assert(cls != cls->superclass); // 这两个断言很奇怪，完全想不到什么奇葩情况下这两个断言会不成立
         assert(cls != supercls);
-        if (!supercls) return YES;
-        if (supercls->isRealized()) return NO;
-        return missingWeakSuperclass(supercls);
+        if (!supercls) return YES; // 如果父类是 weak-link 的，则 supercls 为 nil，返回 YES，结束递归
+        if (supercls->isRealized()) return NO; // 如果父类已经被 realized，则直接返回 NO，因为 realized 的类一定是正常的
+                                               // 结束递归
+        return missingWeakSuperclass(supercls); // 否则递归寻找祖宗类们
     }
 }
 
@@ -2406,6 +2493,8 @@ missingWeakSuperclass(Class cls)
 * Non-lazily realizes all unrealized classes in the given image.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 以非惰性的方式 realize 给定镜像中所有未被 realize 的类
+// 调用者：realizeAllClasses()
 static void realizeAllClassesInImage(header_info *hi)
 {
     runtimeLock.assertWriting();
@@ -2413,15 +2502,16 @@ static void realizeAllClassesInImage(header_info *hi)
     size_t count, i;
     classref_t *classlist;
 
-    if (hi->allClassesRealized) return;
+    if (hi->allClassesRealized) return; // 如果 hi 中已经标记了 所有的类已经全被 realized 了，就直接返回
 
-    classlist = _getObjc2ClassList(hi, &count);
+    classlist = _getObjc2ClassList(hi, &count); // 获得 hi 中的所有 objective-2.0 的类，count 是类的数量
 
+    // 遍历所有类，将每个类对应的重映射类都 realize 了
     for (i = 0; i < count; i++) {
         realizeClass(remapClass(classlist[i]));
     }
 
-    hi->allClassesRealized = YES;
+    hi->allClassesRealized = YES; // 标记该镜像中所有的类已经全被 realized 了
 }
 
 
@@ -2430,11 +2520,14 @@ static void realizeAllClassesInImage(header_info *hi)
 * Non-lazily realizes all unrealized classes in all known images.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 以非惰性的方式 realize 所有已知镜像中的所有未被 realize 的类
+// 调用者：_read_images() / objc_copyClassList() / objc_getClassList()
 static void realizeAllClasses(void)
 {
     runtimeLock.assertWriting();
 
     header_info *hi;
+    // 遍历所有镜像，将每个镜像中的所有类都 realize 了
     for (hi = FirstHeader; hi; hi = hi->next) {
         realizeAllClassesInImage(hi);
     }
@@ -2448,20 +2541,25 @@ static void realizeAllClasses(void)
 * Assumes the named class doesn't exist yet.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 为名字为 name 的 future class 分配内存，存进 future_named_class_map 映射表里，并返回这个 class
+// 如果它已经在映射表里，那么已经分配过内存了，就直接返回
+// 调用者：objc_getFutureClass()
 Class _objc_allocateFutureClass(const char *name)
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // 加写锁
 
     Class cls;
-    NXMapTable *map = futureNamedClasses();
+    NXMapTable *map = futureNamedClasses(); // 取得 future_named_class_map 映射表
 
-    if ((cls = (Class)NXMapGet(map, name))) {
+    if ((cls = (Class)NXMapGet(map, name))) { // 从映射表中寻找 name 对应的 future 类
         // Already have a future class for this name.
-        return cls;
+        return cls; // 如果在映射表中找到了，就将其返回
     }
 
-    cls = _calloc_class(sizeof(objc_class));
-    addFutureNamedClass(name, cls);
+    cls = _calloc_class(sizeof(objc_class)); // 如果映射表中找不到，就在堆中分配一块内存，用来放 name 对应的 future 类
+                                             // 这时这块内存里还都是 0，类中 rw/ro 的内存分配是在 addFutureNamedClass 中做的
+    addFutureNamedClass(name, cls); // 添加 cls 类到 future_named_class_map 映射表中
+                                    // 里面还会为 cls 中的 rw/ro 分配内存
 
     return cls;
 }
@@ -2473,6 +2571,12 @@ Class _objc_allocateFutureClass(const char *name)
 * structure that will be used for the class when and if it 
 * does get loaded.
 * Not thread safe. 
+ 
+ // 返回 name 对应的 future class，或者一个没有被初始化过的 class，见 _objc_allocateFutureClass()，确实没有初始化
+ // 用于 CoreFoundation 的桥接
+ // 千万不要自己调用这个函数
+ // 不是线程安全的，因为没加锁
+ // objc4库中没有地方调用过这个函数
 **********************************************************************/
 Class objc_getFutureClass(const char *name)
 {
@@ -2480,7 +2584,7 @@ Class objc_getFutureClass(const char *name)
 
     // YES unconnected, NO class handler
     // (unconnected is OK because it will someday be the real class)
-    cls = look_up_class(name, YES, NO);
+    cls = look_up_class(name, YES, NO); // 根据 name 查找类，后两个参数压根儿没使用，不要纠结
     if (cls) {
         if (PrintFuture) {
             _objc_inform("FUTURE: found %p already in use for %s", 
@@ -2493,10 +2597,12 @@ Class objc_getFutureClass(const char *name)
     // No class or future class with that name yet. Make one.
     // fixme not thread-safe with respect to 
     // simultaneous library load or getFutureClass.
+    
+    // name 没有对应的 future class，那我们自己创建一个吧
     return _objc_allocateFutureClass(name);
 }
 
-
+// 判断 cls 类是否是一个 future class
 BOOL _class_isFutureClass(Class cls)
 {
     return cls  &&  cls->isFuture();
@@ -2513,6 +2619,8 @@ BOOL _class_isFutureClass(Class cls)
  清空所有缓存
  清空 cls 类 / cls 类的元类 / cls 类的子孙类 的方法缓存
  如果 cls 是 nil，就将所有类的缓存都清空 ！！！！
+ 调用者：_method_setImplementation() / _objc_flush_caches() / addMethod() /
+          attachCategories() / method_exchangeImplementations() / setSuperclass()
 **********************************************************************/
 static void flushCaches(Class cls)
 {
@@ -2520,7 +2628,8 @@ static void flushCaches(Class cls)
 
     mutex_locker_t lock(cacheUpdateLock); // cacheUpdateLock 互斥锁加锁
 
-    if (cls) {
+    if (cls) { // 如果指定了需要清空方法缓存的 类
+        
         // 深度遍历 cls 类及其所有子孙类，子类们被记录在 class_rw_t 中
         foreach_realized_class_and_subclass(cls, ^(Class c){
             // 将遍历的类的方法缓存清空
@@ -2560,18 +2669,19 @@ static void flushCaches(Class cls)
     }
 }
 
-
+// 清空 cls 类的方法缓存，如果 cls == nil，则将垃圾桶中的缓存都清空，并强制释放内存
+// 调用者：instrumentObjcMessageSends() 
 void _objc_flush_caches(Class cls)
 {
     {
-        rwlock_writer_t lock(runtimeLock);
-        flushCaches(cls);
+        rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
+        flushCaches(cls); // 清空 cls 类的方法缓存
     }
 
-    if (!cls) {
+    if (!cls) { // 如果 cls 类为 nil
         // collectALot if cls==nil
-        mutex_locker_t lock(cacheUpdateLock);
-        cache_collect(true);
+        mutex_locker_t lock(cacheUpdateLock); // 互斥锁 cacheUpdateLock 加锁
+        cache_collect(true); // 清空垃圾桶，参数 true 代表需要强制地释放内存
     }
 }
 
@@ -2583,11 +2693,17 @@ void _objc_flush_caches(Class cls)
 *
 * Locking: write-locks runtimeLock
 **********************************************************************/
+// 处理给定的镜像，这些镜像被 dyld库 映射
+// 这个函数其实是一个回调函数，被 dyld 库调用，参数中的镜像信息也是 dyld 库传进来的，详情见 _objc_init()
+// 调用者 ：_objc_init()
 const char *
 map_2_images(enum dyld_image_states state, uint32_t infoCount,
              const struct dyld_image_info infoList[])
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
+    
+    // 在 map_images_nolock 函数中，完成所有 class 的注册、fixup等工作，
+    // 还包括初始化自动释放池、初始化 side table 等等工作
     return map_images_nolock(state, infoCount, infoList);
 }
 
@@ -2599,6 +2715,12 @@ map_2_images(enum dyld_image_states state, uint32_t infoCount,
 *
 * Locking: write-locks runtimeLock and loadMethodLock
 **********************************************************************/
+// 加载镜像，
+// 处理镜像中的 +load 方法，这些镜像被 dyld 库映射
+// 这个函数和 map_2_images 一样，也是一个回调函数，被 dyld 库调用，
+// 参数中的镜像信息也是 dyld 库传进来的，详情见 _objc_init()
+// 如果在镜像中找到 +load 方法，会调用 call_load_methods 调用这些 +load 方法（说“这些”，因为有很多类）
+// 调用者 ：_objc_init()
 const char *
 load_images(enum dyld_image_states state, uint32_t infoCount,
             const struct dyld_image_info infoList[])
@@ -2615,17 +2737,19 @@ load_images(enum dyld_image_states state, uint32_t infoCount,
     }
     if (!found) return nil;
 
-    recursive_mutex_locker_t lock(loadMethodLock);
-
+    recursive_mutex_locker_t lock(loadMethodLock); // loadMethodLock 递归互斥锁加锁
+                                                   // 递归锁在同一线程上是可重入的，在不同线程上与普通互斥锁没有区别
+                                                   // 可重入，就是同一线程上可以多次加锁，比如递归的时候
+                                                   // 解锁与加锁的次数必须相同，加锁几次，就必须解锁几次
     // Discover load methods
     {
         rwlock_writer_t lock2(runtimeLock);
         found = load_images_nolock(state, infoCount, infoList);
     }
 
-    // Call +load methods (without runtimeLock - re-entrant)
+    // Call +load methods (without runtimeLock - re-entrant)  不加 runtimeLock 锁，可重入，#疑问：什么意思？？
     if (found) {
-        call_load_methods();
+        call_load_methods(); // 调用 +load
     }
 
     return nil;
@@ -3821,8 +3945,9 @@ _protocol_getMethodTypeEncoding(Protocol *proto_gen, SEL sel,
 * Returns the (Swift-demangled) name of the given protocol.
 * Locking: none
 **********************************************************************/
+// 取得重整前的协议名称
 const char *
-protocol_t::demangledName() 
+protocol_t::demangledName()
 {
     assert(size >= offsetof(protocol_t, _demangledName)+sizeof(_demangledName));
     
@@ -5831,13 +5956,17 @@ void objc_class::setHasCustomAWZ(bool inherited)
 /***********************************************************************
 * Mark this class and all of its subclasses as requiring raw isa pointers
 **********************************************************************/
+// 设置本类，以及本类的所有子类都必须使用 raw isa pointers
+// 参数 inherited 没啥用，只是打印信息的时候用了下，不要深究
+// 调用者：_read_images() / addSubclass() / realizeClass()
 void objc_class::setRequiresRawIsa(bool inherited) 
 {
     Class cls = (Class)this;
     runtimeLock.assertWriting();
 
-    if (requiresRawIsa()) return;
+    if (requiresRawIsa()) return; // 再确认一下，是否真的需要 raw isa，如果不需要，就不往下干了，直接返回
     
+    // 遍历自己和自己的所有子类
     foreach_realized_class_and_subclass(cls, ^(Class c){
         if (c->isInitialized()) {
             _objc_fatal("too late to require raw isa");
@@ -5848,7 +5977,7 @@ void objc_class::setRequiresRawIsa(bool inherited)
             return;
         }
 
-        c->bits.setRequiresRawIsa();
+        c->bits.setRequiresRawIsa(); // 将每一个类都设为需要 raw isa
 
         if (PrintRawIsa) c->printRequiresRawIsa(inherited  ||  c != cls);
     });
@@ -6353,6 +6482,8 @@ class_replaceProperty(Class cls, const char *name,
 * Look up a class by name, and realize it.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 根据 name 查找类，并且如果该类没有 realize 就将其 realize 了
+// 调用者 ：gdb_class_getClass() / objc_getClass() / objc_getFutureClass() / objc_lookUpClass()
 Class 
 look_up_class(const char *name, 
               bool includeUnconnected __attribute__((unused)), 
@@ -6363,13 +6494,13 @@ look_up_class(const char *name,
     Class result;
     bool unrealized;
     {
-        rwlock_reader_t lock(runtimeLock);
-        result = getClass(name);
-        unrealized = result  &&  !result->isRealized();
+        rwlock_reader_t lock(runtimeLock); // 加读锁
+        result = getClass(name); // 利用 getClass 函数查找类
+        unrealized = result  &&  !result->isRealized(); // 如果找到了类，且类没有被 realize，就标记为 unrealized
     }
-    if (unrealized) {
-        rwlock_writer_t lock(runtimeLock);
-        realizeClass(result);
+    if (unrealized) { // 类存在，且没有被 realize
+        rwlock_writer_t lock(runtimeLock); // 加写锁
+        realizeClass(result); // 将类 realize 了
     }
     return result;
 }

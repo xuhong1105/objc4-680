@@ -325,6 +325,7 @@ OBJC_EXPORT const uint8_t *_object_getIvarLayout(Class cls_gen, id object)
 OBJC_EXPORT BOOL _class_usesAutomaticRetainRelease(Class cls)
     __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_5_0);
 
+// 判断 cls 类是否是一个 future class
 OBJC_EXPORT BOOL _class_isFutureClass(Class cls)
     __OSX_AVAILABLE_STARTING(__MAC_10_9, __IPHONE_7_0);
 

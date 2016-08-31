@@ -101,10 +101,12 @@ struct weak_table_t {
 };
 
 /// Adds an (object, weak pointer) pair to the weak table.
+// 在 weak_table 中注册 referrer 对 referent 的弱引用
 id weak_register_no_lock(weak_table_t *weak_table, id referent, 
                          id *referrer, bool crashIfDeallocating);
 
 /// Removes an (object, weak pointer) pair from the weak table.
+// 解除 referrer 指针对 referent 的弱引用
 void weak_unregister_no_lock(weak_table_t *weak_table, id referent, id *referrer);
 
 #if DEBUG
@@ -113,9 +115,13 @@ bool weak_is_registered_no_lock(weak_table_t *weak_table, id referent);
 #endif
 
 /// Assert a weak pointer is valid and retain the object during its use.
+// 我猜是查找 referrer 所指向的 referent
+// referrer 存有对象，但并不代表 referrer 对这个对象有弱引用，所以需要去 weak table 中查是否真的有弱引用关系
 id weak_read_no_lock(weak_table_t *weak_table, id *referrer);
 
 /// Called on object destruction. Sets all remaining weak pointers to nil.
+// 将对象的弱引用清空，并将指向它的 __weak pointer 变成 nil
+// 在 sidetable_clearDeallocating 和 clearDeallocating_slow 被调用
 void weak_clear_no_lock(weak_table_t *weak_table, id referent);
 
 __END_DECLS

@@ -47,6 +47,7 @@ BREAKPOINT_FUNCTION(
  * 
  * @return Size unrestricted hash of pointer.
  */
+// 返回地址的 hash 值
 static inline uintptr_t hash_pointer(objc_object *key) {
     return ptr_hash((uintptr_t)key);
 }

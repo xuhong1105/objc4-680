@@ -49,6 +49,7 @@ extern void _dyld_fork_child();
 //
 // Possible state changes for which you can register to be notified
 //
+// 动态库镜像的状态
 enum dyld_image_states
 {
 	dyld_image_state_mapped					= 10,		// No batch notification for this

@@ -783,7 +783,10 @@ OBJC_EXPORT void class_setWeakIvarLayout(Class cls, const uint8_t *layout)
  * 
  * @warning Do not call this function yourself.
  */
-OBJC_EXPORT Class objc_getFutureClass(const char *name) 
+// 返回 name 对应的 future class，或者一个没有被初始化过的 class，见 _objc_allocateFutureClass()，确实没有初始化
+// 用于 CoreFoundation 的桥接
+// 千万不要自己调用这个函数
+OBJC_EXPORT Class objc_getFutureClass(const char *name)
      __OSX_AVAILABLE_STARTING(__MAC_10_5, __IPHONE_2_0)
      OBJC_ARC_UNAVAILABLE;
 

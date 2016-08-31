@@ -68,7 +68,7 @@ static tls_key_t _objc_pthread_key;
                 // 用来在 TLS 保存线程数据 _objc_pthread_data 的 key
 
 // Selectors
-SEL SEL_load = NULL;
+SEL SEL_load = NULL;    // +load 方法的 SEL
 SEL SEL_initialize = NULL;
 SEL SEL_resolveInstanceMethod = NULL;
 SEL SEL_resolveClassMethod = NULL;
@@ -91,7 +91,7 @@ SEL SEL_retainWeakReference = NULL;
 SEL SEL_allowsWeakReference = NULL;
 
 
-header_info *FirstHeader = 0;  // NULL means empty list
+header_info *FirstHeader = 0;  // NULL means empty list 第一个 image(镜像)
 header_info *LastHeader  = 0;  // NULL means invalid; recompute it
 int HeaderCount = 0;
 

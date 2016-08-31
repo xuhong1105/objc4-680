@@ -181,6 +181,9 @@ void remove_category_from_loadable_list(Category cat)
 *
 * Called only by call_load_methods().
 **********************************************************************/
+// 调用 loadable_classes 中所有类的 +load 方法
+// 但是如果新的类变为 loadable，是不会调用它们的 +load 方法的
+// 调用者：call_load_methods()
 static void call_class_loads(void)
 {
     int i;
@@ -221,6 +224,7 @@ static void call_class_loads(void)
 *
 * Called only by call_load_methods().
 **********************************************************************/
+// 调用分类中的 +load 方法
 static bool call_category_loads(void)
 {
     int i, shift;
@@ -334,6 +338,7 @@ static bool call_category_loads(void)
 * Locking: loadMethodLock must be held by the caller 
 *   All other locks must not be held.
 **********************************************************************/
+// 这个函数中调用类的 +load 方法
 void call_load_methods(void)
 {
     static bool loading = NO;
