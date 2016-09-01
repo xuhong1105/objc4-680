@@ -123,7 +123,8 @@ inline void
 objc_object::initClassIsa(Class cls)
 {
     // disable non-pointer isa fields
-    if (DisableIndexedIsa) {
+    if (DisableIndexedIsa) { // 是否禁止了 non-pointer isa
+                             // DisableIndexedIsa 是在 _read_images 中被赋值的
         initIsa(cls, false, false);
     } else {
         initIsa(cls, true, false);
@@ -147,8 +148,8 @@ objc_object::initInstanceIsa(Class cls, bool hasCxxDtor)
     initIsa(cls, true, hasCxxDtor);
 }
 
-// cls : 类
-// indexed : whether enable non-pointer isa fields
+// 初始化 cls 类的 isa
+// indexed : 是否支持 non-pointer isa，non-pointer 的 isa 会在 isa 中存一些其他的信息
 // hasCxxDtor : 是否有c++的析构函数
 inline void 
 objc_object::initIsa(Class cls, bool indexed, bool hasCxxDtor)

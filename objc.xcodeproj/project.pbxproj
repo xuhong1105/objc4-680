@@ -350,6 +350,7 @@
 		9F08B13F1D59D51700F23EE8 /* llvm-type_traits.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "llvm-type_traits.h"; path = "runtime/llvm-type_traits.h"; sourceTree = "<group>"; };
 		9F08B1401D59D51700F23EE8 /* llvm-MathExtras.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "llvm-MathExtras.h"; path = "runtime/llvm-MathExtras.h"; sourceTree = "<group>"; };
 		9F08B1411D59D51700F23EE8 /* llvm-AlignOf.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = "llvm-AlignOf.h"; path = "runtime/llvm-AlignOf.h"; sourceTree = "<group>"; };
+		9F2F0F5F1D78033E005695CE /* mach_o_segments.gif */ = {isa = PBXFileReference; lastKnownFileType = image.gif; path = mach_o_segments.gif; sourceTree = "<group>"; };
 		9F4CD6911D6EB3A7005AF46B /* class-diagram.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = "class-diagram.jpg"; sourceTree = "<group>"; };
 		9F6425551D71DB4900D117F6 /* libauto.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libauto.dylib; path = ../../../../../../../../../../usr/lib/libauto.dylib; sourceTree = "<group>"; };
 		9F64255A1D71F2C000D117F6 /* _simple.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = _simple.h; sourceTree = "<group>"; };
@@ -637,6 +638,7 @@
 		9F4CD6901D6EB3A7005AF46B /* 配图 */ = {
 			isa = PBXGroup;
 			children = (
+				9F2F0F5F1D78033E005695CE /* mach_o_segments.gif */,
 				9F4CD6911D6EB3A7005AF46B /* class-diagram.jpg */,
 			);
 			path = "配图";

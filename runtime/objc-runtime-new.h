@@ -505,10 +505,10 @@ struct protocol_list_t {
     }
 };
 
-// 本地的盖了戳的 category
+// 本地的盖了戳的 category，即已经被添加进了 unattachedCategories
 struct locstamped_category_t {
     category_t *cat;   //  category
-    struct header_info *hi;  // category 的头部信息
+    struct header_info *hi;  // 所属的 header，即所属的镜像
 };
 
 // 存放 locstamped_category_t 的列表
@@ -1891,7 +1891,7 @@ struct swift_class_t : objc_class {
 
 struct category_t {
     const char *name; // 分类的名字
-    classref_t cls;   // 分类所属的类
+    classref_t cls;   // 分类所属的类，classref_t 专门用于 unremapped 的类
     struct method_list_t *instanceMethods;  // 实例方法列表
     struct method_list_t *classMethods;     // 类方法列表
     struct protocol_list_t *protocols;      // 遵循的协议列表

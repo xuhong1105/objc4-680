@@ -744,6 +744,10 @@ load_images_nolock(enum dyld_image_states state,uint32_t infoCount,
 * 
 * Locking: loadMethodLock(both) and runtimeLock(new) acquired by unmap_image.
 **********************************************************************/
+// 该函数在 dyld 进行 ummap 镜像前，对镜像做一些处理的，
+// unmap，即 un-memory-mapped，这里应该就是取消内存映射，移除镜像的意思，
+// 该函数被 unmap_image() 调用，需要事先在 unmap_image() 函数中加上 loadMethodLock 和 runtimeLock 锁
+// 主要工作就是：找到对应的镜像，销毁镜像中的分类和类，并将镜像从镜像列表中删除并销毁
 void 
 unmap_image_nolock(const struct mach_header *mh)
 {
@@ -754,13 +758,14 @@ unmap_image_nolock(const struct mach_header *mh)
     header_info *hi;
     
     // Find the runtime's header_info struct for the image
+    // 遍历镜像，找到第一个与 mh 匹配的 header_info
     for (hi = FirstHeader; hi != NULL; hi = hi->next) {
         if (hi->mhdr == (const headerType *)mh) {
             break;
         }
     }
 
-    if (!hi) return;
+    if (!hi) return; // 如果没有匹配的，就直接返回
 
     if (PrintImages) { 
         _objc_inform("IMAGES: unloading image for %s%s%s%s\n", 
@@ -769,8 +774,8 @@ unmap_image_nolock(const struct mach_header *mh)
                      _objcHeaderIsReplacement(hi) ? " (replacement)" : "", 
                      _gcForHInfo2(hi));
     }
-
-#if SUPPORT_GC
+ 
+#if SUPPORT_GC  // 如果有 GC，GC已经被淘汰了，不要去深究
     if (UseGC) {
         uint8_t *seg;
         unsigned long seg_size;
@@ -789,10 +794,10 @@ unmap_image_nolock(const struct mach_header *mh)
     }
 #endif
 
-    _unload_image(hi);
+    _unload_image(hi); // 卸载镜像，销毁类和分类的重要都是在里面做的
 
     // Remove header_info from header list
-    removeHeader(hi);
+    removeHeader(hi); // 将该 header_info 从列表中删除
     free(hi);
 }
 

@@ -401,6 +401,7 @@ static class_ro_t *make_ro_writeable(class_rw_t *rw)
 **********************************************************************/
 // 取得一个存放没有被 attached 的分类们的数据结构
 // 这个数据结构是一个静态变量，所以每次返回的都是同一个
+// key : 类   value : 分类们
 static NXMapTable *unattachedCategories(void)
 {
     runtimeLock.assertWriting(); // runtimeLock 需要被上写锁
@@ -424,24 +425,31 @@ static NXMapTable *unattachedCategories(void)
 * Records an unattached category.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
-static void addUnattachedCategoryForClass(category_t *cat, Class cls, 
-                                          header_info *catHeader)
+// 添加一个 unattached 的分类到 cls 类上，
+// 即把这个分类添加到 cls 对应的所有 unattached 的分类的列表中，见 unattachedCategories()
+// 调用者：_read_images()
+static void addUnattachedCategoryForClass(category_t *cat, Class cls, header_info *catHeader)
 {
     runtimeLock.assertWriting();
 
     // DO NOT use cat->cls! cls may be cat->cls->isa instead
-    NXMapTable *cats = unattachedCategories();
+    NXMapTable *cats = unattachedCategories(); // 取得存储所有没有被 attached 的分类的列表
     category_list *list;
 
+    // 从所有 unattached 的分类列表中取得 cls 类对应的所有没有被 attach 的分类列表
     list = (category_list *)NXMapGet(cats, cls);
-    if (!list) {
+    if (!list) { // 如果 cls 没有未  attach 的分类
+        // 就开辟出一个单位的空间，用来放新来的这个分类
         list = (category_list *)
             calloc(sizeof(*list) + sizeof(list->list[0]), 1);
     } else {
+        // 否则开辟出比原来多一个单位的空间，用来放新来的这个分类，因为 realloc ，所以原来的数据会被拷贝过来
         list = (category_list *)
             realloc(list, sizeof(*list) + sizeof(list->list[0]) * (list->count + 1));
     }
+    // 将新来的分类 cat 添加刚刚开辟的位置上
     list->list[list->count++] = (locstamped_category_t){cat, catHeader};
+    // 将新的 list 重新插入 cats 中，会覆盖老的 list
     NXMapInsert(cats, cls, list);
 }
 
@@ -870,11 +878,12 @@ static void methodizeClass(Class cls)
 /***********************************************************************
 * remethodizeClass
 * Attach outstanding categories to an existing class.
-* Fixes up cls's method list, protocol list, and property list.（瞎说，哪里有做这事儿）
+* Fixes up cls's method list, protocol list, and property list.（有没有 fixup 另说，但确实添加方法、协议、属性了）
 * Updates method caches for cls and its subclasses.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
 // 再次 methodize 类 cls，会重新 attachCategories 一次未被 attach 的分类们
+// 而未被 attach 的分类是在 addUnattachedCategoryForClass() 中被添加的
 // 该函数被 _read_images() 函数调用
 static void remethodizeClass(Class cls)
 {
@@ -1118,10 +1127,11 @@ static char *copySwiftV1MangledName(const char *string, bool isProtocol = false)
 // This is a misnomer（用词不当、误称）: gdb_objc_realized_classes is actually a list of
 // named classes not in the dyld shared cache, whether realized or not.
 
-// 这是一个误称（知道是误称还不改？？）：gdb_objc_realized_classes 事实上是一个装了不在 dyld shared cache 中的
-// named classes 的列表，无论是否是 realized 的
+// 这是一个误称（知道是误称还不改？？）：gdb_objc_realized_classes 事实上是一个装了不在 dyld 的 shared cache 中的类的
+// named classes 的列表，无论是否是 realized 的，见 _read_images()
 // key: name  value: Class
 // 我猜，这个应该就是相对于 nonmeta_class_map 的一级映射表吧，见 getNonMetaClass()
+// 它是在 _read_images() 中被创建(初始化)的
 NXMapTable *gdb_objc_realized_classes;  // exported for debuggers in objc-gdb.h
 
 // 根据名字查找类，这个类可能没有被 realize 过
@@ -1180,7 +1190,9 @@ static Class getClass(const char *name)
  添加 name -> cls 对到 named non-meta class map（gdb_objc_realized_classes）中
  警告有副本，但是会保持老的映射，即会有多份，
  新的映射被存在了 secondary metaclass map(二级元类映射表) 表中，见 addNonMetaClass()，
- replacing : 被代替的老的 cls，如果有旧映射，但是与 replacing 不符合，还是会保留旧映射，否则新值会将 gdb_objc_realized_classes 中的旧映射覆盖
+ replacing : 被代替的老的 cls (见 readClass()) 如果有旧映射，但是与 replacing 不符合，还是会保留旧映射，
+             否则新值会将 gdb_objc_realized_classes 中的旧映射覆盖
+ 调用者：objc_duplicateClass() / objc_registerClassPair() / readClass()
 **********************************************************************/
 static void addNamedClass(Class cls, const char *name, Class replacing = nil)
 {
@@ -1235,6 +1247,7 @@ static void removeNamedClass(Class cls, const char *name)
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
 static NXHashTable *realized_class_hash = nil; // 记录所有经过 realized 的非元类
+                                               // 它是在 _read_images() 中被创建(初始化)的
 
 // 取得存有所有经过 realized 的非元类的哈希表
 static NXHashTable *realizedClasses(void)
@@ -1255,6 +1268,7 @@ static NXHashTable *realizedClasses(void)
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
 static NXHashTable *realized_metaclass_hash = nil; // 记录所有经过 realized 的元类
+                                                // 它是在 _read_images() 中被创建(初始化)的
 
 // 取得存有所有经过 realized 的元类的哈希表
 // 该函数被 addRealizedMetaclass()/flushCaches()/removeRealizedMetaclass()函数调用
@@ -1410,7 +1424,7 @@ static void addFutureNamedClass(const char *name, Class cls)
 * Returns nil if the name is not used by a future class.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
-// 将指定 name 对应的 future 的类从 future_named_class_map 中移除
+// 将指定 name 对应的 future 类从 future_named_class_map 中移除
 // 因为 这个类 已经被 realized 过了，它已经不再处于 future 状态
 // 返回 name 对应的 future class，如果没有对应的 future class，就返回 nil
 // caller : readClass()
@@ -1573,6 +1587,7 @@ Class _class_remap(Class cls)
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
 // fix-up 一个类引用，万一这个类引用指向的类已经被 reallocated(重新分配？) 或者它是一个 ignored weak-linked 类
+// 从重映射类表中用 *clsref 为 key 取出新类，如果 *clsref 不等于新类，则将新类赋给 *clsref
 // clsref 是一个二级指针，它指向一个类的指针
 // 调用者 ：_read_images()
 static void remapClassRef(Class *clsref)
@@ -2783,12 +2798,14 @@ load_images(enum dyld_image_states state, uint32_t infoCount,
 *
 * Locking: write-locks runtimeLock and loadMethodLock
 **********************************************************************/
+// _objc_init() 中注册的用于 dyld 进行 ummap 镜像前，对镜像做了一些处理的函数，
+// unmap，即 un-memory-mapped，这里应该就是取消内存映射，移除镜像的意思，
 void 
 unmap_image(const struct mach_header *mh, intptr_t vmaddr_slide)
 {
-    recursive_mutex_locker_t lock(loadMethodLock);
-    rwlock_writer_t lock2(runtimeLock);
-    unmap_image_nolock(mh);
+    recursive_mutex_locker_t lock(loadMethodLock); // loadMethodLock 递归锁加锁
+    rwlock_writer_t lock2(runtimeLock); // runtimeLock 加写锁
+    unmap_image_nolock(mh); // 这个函数中会找到对应的镜像，销毁镜像中的分类和类，并将镜像从镜像列表中删除
 }
 
 
@@ -2803,21 +2820,32 @@ unmap_image(const struct mach_header *mh, intptr_t vmaddr_slide)
 * - something else (space for this class was reserved by a future class)
 *
 * Locking: runtimeLock acquired by map_images or objc_readClassPair
+ 
+ 读取一个编译器写的 类 或 元类，
+ 返回新类的指针，有可能是：
+    - cls
+    - nil (cls 有一个 missing weak-linked 的父类)
+    - 其他 (给一个 future 类预留的空间)
+ 调用者：_read_images()
 **********************************************************************/
-Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
+Class readClass(Class cls, bool headerIsBundle/*是否是 bundle*/, bool headerIsPreoptimized/*是否被预优化过*/)
 {
-    const char *mangledName = cls->mangledName();
+    const char *mangledName = cls->mangledName(); // 取得 cls 的重整后的名字
     
-    if (missingWeakSuperclass(cls)) {
+    if (missingWeakSuperclass(cls)) { // 查看 cls 类的祖宗类中是否有类是 weak-linked 的，并且已经 missing
         // No superclass (probably weak-linked). 
         // Disavow any knowledge of this subclass.
+        
+        // 祖宗类里有 missing weak-linked 的
+        // 则 cls 的所有信息也是不可信的，所以将其添加到重映射表里，映射为nil，即 cls -> nil
+        
         if (PrintConnecting) {
             _objc_inform("CLASS: IGNORING class '%s' with "
                          "missing weak-linked superclass", 
                          cls->nameForLogging());
         }
-        addRemappedClass(cls, nil);
-        cls->superclass = nil;
+        addRemappedClass(cls, nil); // 将其添加到重映射表里，映射为nil
+        cls->superclass = nil; // 父类指针指向 nil
         return nil;
     }
     
@@ -2830,45 +2858,54 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
     // does not bind shared cache absolute symbols as expected.
     // This (and the __ARCLite__ hack below) can be removed 
     // once the simulator drops 10.8 support.
-#if TARGET_IPHONE_SIMULATOR
+#if TARGET_IPHONE_SIMULATOR // 如果是模拟器的话，需要手动将 类和元类 的方法存储的 容量和占用量 清零
     if (cls->cache._mask) cls->cache._mask = 0;
     if (cls->cache._occupied) cls->cache._occupied = 0;
     if (cls->ISA()->cache._mask) cls->ISA()->cache._mask = 0;
     if (cls->ISA()->cache._occupied) cls->ISA()->cache._occupied = 0;
 #endif
 
-    Class replacing = nil;
+    Class replacing = nil; // 记录被代替的类
+    
+    // 将 mangledName 对应的 future 的类从 future_named_class_map 中移除
+    // 如果它不是一个 future 类，则会返回 nil
     if (Class newCls = popFutureNamedClass(mangledName)) {
         // This name was previously allocated as a future class.
         // Copy objc_class to future class's struct.
         // Preserve future's rw data block.
         
+        // 如果 newCls 有值，则 newcls 类是一个 future 类
+        
+        // 但是 newcls 不能是 swift 类，因为太大了？啥意思？swift类能有多大
         if (newCls->isSwift()) {
             _objc_fatal("Can't complete future class request for '%s' "
                         "because the real class is too big.", 
                         cls->nameForLogging());
         }
         
-        class_rw_t *rw = newCls->data();
-        const class_ro_t *old_ro = rw->ro;
-        memcpy(newCls, cls, sizeof(objc_class));
-        rw->ro = (class_ro_t *)newCls->data();
-        newCls->setData(rw);
-        free((void *)old_ro->name);
-        free((void *)old_ro);
+        class_rw_t *rw = newCls->data();     // 取得 newCls 中的 rw，rw 中除了 ro 外的其他数据是需要保留的
+        const class_ro_t *old_ro = rw->ro;   // 旧的 ro
+        memcpy(newCls, cls, sizeof(objc_class)); // 将 cls 中的数据完整得拷贝到 newCls 中
+        rw->ro = (class_ro_t *)newCls->data();   // rw 中使用新的 ro
+        newCls->setData(rw);        // 将 rw 赋给 newCls，那么 newCls 中使用的还是原来的 rw，只是其中的 ro 变了
+        free((void *)old_ro->name); // 旧 ro 中的 name 是在堆上分配的，所以需要释放
+        free((void *)old_ro);       // 将旧 ro 释放
         
-        addRemappedClass(cls, newCls);
+        addRemappedClass(cls, newCls); // 将 cls -> newCls 的重映射添加到映射表中
         
-        replacing = cls;
-        cls = newCls;
+        replacing = cls; // 记录下 cls 类被代替
+        cls = newCls;   // 新类 newCls 赋给 cls
     }
     
-    if (headerIsPreoptimized  &&  !replacing) {
+    if (headerIsPreoptimized  &&  !replacing) { // 预优化过，且没有被代替
         // class list built in shared cache
         // fixme strict assert doesn't work because of duplicates
         // assert(cls == getClass(name));
         assert(getClass(mangledName));
     } else {
+        // 否则将 mangledName -> cls 的映射添加到 gdb_objc_realized_classes 表中
+        // 如果上 cls 被 newCls 代替了，那么 replacing 就是老的 cls，即在 gdb_objc_realized_classes 中
+        // 也会将老的 cls 代替
         addNamedClass(cls, mangledName, replacing);
     }
     
@@ -2886,6 +2923,8 @@ Class readClass(Class cls, bool headerIsBundle, bool headerIsPreoptimized)
 * readProtocol
 * Read a protocol as written by a compiler.
 **********************************************************************/
+// 读取一个编译器写的协议
+// 调用者：_read_images()
 static void
 readProtocol(protocol_t *newproto, Class protocol_class,
              NXMapTable *protocol_map, 
@@ -2893,11 +2932,14 @@ readProtocol(protocol_t *newproto, Class protocol_class,
 {
     // This is not enough to make protocols in unloaded bundles safe, 
     // but it does prevent crashes when looking up unrelated protocols.
+    // 如果镜像是 bundle，就使用 NXMapKeyCopyingInsert 函数，否则使用 NXMapInsert
+    // NXMapKeyCopyingInsert 会在堆中拷贝 key
     auto insertFn = headerIsBundle ? NXMapKeyCopyingInsert : NXMapInsert;
 
+    // 根据新协议的重整名称，去 protocol_map 映射表中查找老的协议
     protocol_t *oldproto = (protocol_t *)getProtocol(newproto->mangledName);
 
-    if (oldproto) {
+    if (oldproto) { // 如果存在老的协议
         // Some other definition already won.
         if (PrintProtocols) {
             _objc_inform("PROTOCOLS: protocol at %p is %s  "
@@ -2905,26 +2947,31 @@ readProtocol(protocol_t *newproto, Class protocol_class,
                          newproto, oldproto->nameForLogging(), oldproto);
         }
     }
-    else if (headerIsPreoptimized) {
+    else if (headerIsPreoptimized) { // 如果不存在老的协议，但是镜像是经过预优化的
         // Shared cache initialized the protocol object itself, 
         // but in order to allow out-of-cache replacement we need 
         // to add it to the protocol table now.
 
+        // 根据新协议的重整名称 查找 预优化的缓存协议
+        // 但是 getPreoptimizedProtocol 现在一直返回 nil
         protocol_t *cacheproto = (protocol_t *)
             getPreoptimizedProtocol(newproto->mangledName);
+        
         protocol_t *installedproto;
         if (cacheproto  &&  cacheproto != newproto) {
             // Another definition in the shared cache wins (because 
             // everything in the cache was fixed up to point to it).
             installedproto = cacheproto;
         }
-        else {
+        else { // 因为 cacheproto 永远是 nil，所以一直走 else 分支
             // This definition wins.
             installedproto = newproto;
         }
         
         assert(installedproto->getIsa() == protocol_class);
         assert(installedproto->size >= sizeof(protocol_t));
+        
+        // 将 新协议的重整名称 -> 新协议 的映射插入 protocol_map 映射表中
         insertFn(protocol_map, installedproto->mangledName, 
                  installedproto);
         
@@ -2939,18 +2986,20 @@ readProtocol(protocol_t *newproto, Class protocol_class,
             }
         }
     }
-    else if (newproto->size >= sizeof(protocol_t)) {
+    else if (newproto->size >= sizeof(protocol_t)) { // 如果不存在老的协议，且没有经过预优化，且新协议的大小
+                                                     // 比 protocol_t 的最初的尺寸要大
         // New protocol from an un-preoptimized image
         // with sufficient storage. Fix it up in place.
         // fixme duplicate protocols from unloadable bundle
         newproto->initIsa(protocol_class);  // fixme pinned
-        insertFn(protocol_map, newproto->mangledName, newproto);
+        insertFn(protocol_map, newproto->mangledName, newproto); // 就将 新协议的重整名称 -> 新协议 的映射插入
+                                                                 // protocol_map 映射表中
         if (PrintProtocols) {
             _objc_inform("PROTOCOLS: protocol at %p is %s",
                          newproto, newproto->nameForLogging());
         }
     }
-    else {
+    else { // 实在看不懂了
         // New protocol from an un-preoptimized image 
         // with insufficient storage. Reallocate it.
         // fixme duplicate protocols from unloadable bundle
@@ -2986,16 +3035,21 @@ readProtocol(protocol_t *newproto, Class protocol_class,
 //extern "C" int dyld_get_program_sdk_version();
 #define DYLD_MACOSX_VERSION_10_11 MAC_OS_X_VERSION_10_11
 
+// 读取镜像（即二进制文件）
 // 该函数被 map_images_nolock() 调用
+// hList 是指向一个 header 链表的指针，
+// hList 中包含了很多被加载进来的库，比如 libdispatch.dylib、libxpc.dylib、libsystem_trace.dylib、
+//         libsystem_network.dylib、CoreData、AudioToolBox 等等，
+// 疑问：hCount 是什么？？hCount 并不是 hList 中元素数目，二者不相等？？
 void _read_images(header_info **hList, uint32_t hCount)
 {
-    header_info *hi;
-    uint32_t hIndex;
+    header_info *hi; // 用于遍历
+    uint32_t hIndex; // header index，遍历 hList 时的索引
     size_t count;
     size_t i;
-    Class *resolvedFutureClasses = nil;
-    size_t resolvedFutureClassCount = 0;
-    static bool doneOnce;
+    Class *resolvedFutureClasses = nil; // 一个数组，在堆中分配，存放被 resolve 的 future 类
+    size_t resolvedFutureClassCount = 0; // 记录被 resolve 的 future 类 的数目
+    static bool doneOnce; // 用来标记只执行一次的操作
     TimeLogger ts(PrintImageTimes);
 
     runtimeLock.assertWriting();
@@ -3005,15 +3059,15 @@ void _read_images(header_info **hList, uint32_t hCount)
     crashlog_header_name(nil) && hIndex < hCount && (hi = hList[hIndex]) && crashlog_header_name(hi); \
     hIndex++
 
-    if (!doneOnce) {
+    if (!doneOnce) { // 这个块里的代码只会执行一次
         doneOnce = YES;
 
-#if SUPPORT_NONPOINTER_ISA
+#if SUPPORT_NONPOINTER_ISA  // 如果支持 non-pointer 的 isa
 
-# if TARGET_OS_MAC  &&  !TARGET_OS_IPHONE
+# if TARGET_OS_MAC  &&  !TARGET_OS_IPHONE // 
         // Disable non-pointer isa if the app is too old
         // (linked before OS X 10.11)
-        if (dyld_get_program_sdk_version() < DYLD_MACOSX_VERSION_10_11) {
+        if (dyld_get_program_sdk_version() < DYLD_MACOSX_VERSION_10_11) { // 如果 sdk 版本小于 10.11
             DisableIndexedIsa = true;
             if (PrintRawIsa) {
                 _objc_inform("RAW ISA: disabling non-pointer isa because "
@@ -3024,7 +3078,8 @@ void _read_images(header_info **hList, uint32_t hCount)
 
         // Disable non-pointer isa if the app has a __DATA,__objc_rawisa section
         // New apps that load old extensions may need this.
-        for (EACH_HEADER) {
+        for (EACH_HEADER) { // 遍历 hList，如果 app 有一个 __DATA,__objc_rawisa section
+                            // 就禁止 non-pointer isa
             if (hi->mhdr->filetype != MH_EXECUTE) continue;
             unsigned long size;
             if (getsectiondata(hi->mhdr, "__DATA", "__objc_rawisa", &size)) {
@@ -3039,7 +3094,7 @@ void _read_images(header_info **hList, uint32_t hCount)
 # endif
 
         // Disable non-pointer isa for all GC apps.
-        if (UseGC) {
+        if (UseGC) { // GC，不用管它
             DisableIndexedIsa = true;
             if (PrintRawIsa) {
                 _objc_inform("RAW ISA: disabling non-pointer isa because "
@@ -3049,17 +3104,20 @@ void _read_images(header_info **hList, uint32_t hCount)
 
 #endif
 
-        if (DisableTaggedPointers) {
+        if (DisableTaggedPointers) { // 是否需要禁止 tagged pointer
             disableTaggedPointers();
         }
         
         // Count classes. Size various table based on the total.
-        int total = 0;
-        int unoptimizedTotal = 0;
-        for (EACH_HEADER) {
-            if (_getObjc2ClassList(hi, &count)) {
-                total += (int)count;
-                if (!hi->inSharedCache) unoptimizedTotal += count;
+        // 计算类的总数
+        int total = 0; // 总数
+        int unoptimizedTotal = 0; // 未优化的类的总数，不包括处于 shared cache 中的类
+        for (EACH_HEADER) { // 遍历 hList
+            if (_getObjc2ClassList(hi, &count)) { // 获得 header 中所有 objective-2.0 类的列表
+                total += (int)count; // 总数加 1
+                if (!hi->inSharedCache) { // 如果 header 不在 shared cache 的话，未优化的类的总数加 1
+                    unoptimizedTotal += count;
+                }
             }
         }
         
@@ -3070,6 +3128,11 @@ void _read_images(header_info **hList, uint32_t hCount)
         // namedClasses (NOT realizedClasses)
         // Preoptimized classes don't go in this table.
         // 4/3 is NXMapTable's load factor
+        
+        // 分别创建 gdb_objc_realized_classes、realized_class_hash、realized_metaclass_hash 三个表
+        
+        // gdb_objc_realized_classes 中装的是不在 shared cache 中的类，所以如果经过了预优化，
+        // 那么就只考虑未优化的那些类，即 unoptimizedTotal，否则考虑全部类 total
         int namedClassesSize = 
             (isPreoptimized() ? unoptimizedTotal : total) * 4 / 3;
         gdb_objc_realized_classes =
@@ -3087,23 +3150,33 @@ void _read_images(header_info **hList, uint32_t hCount)
 
     // Discover classes. Fix up unresolved future classes. Mark bundle classes.
 
-    for (EACH_HEADER) {
-        bool headerIsBundle = hi->isBundle();
-        bool headerIsPreoptimized = hi->isPreoptimized();
+    for (EACH_HEADER) { // 遍历 hList
+        bool headerIsBundle = hi->isBundle(); // header 是否是 bundle 类型
+        bool headerIsPreoptimized = hi->isPreoptimized(); // header 是否经过预优化
 
+        // 取出 header 中的所有的 objective-c 2.0 的类
         classref_t *classlist = _getObjc2ClassList(hi, &count);
-        for (i = 0; i < count; i++) {
+        for (i = 0; i < count; i++) { // 遍历类列表
             Class cls = (Class)classlist[i];
+            // 读取该类，会做一些处理，取得新类(逻辑很复杂，完全懵圈)
             Class newCls = readClass(cls, headerIsBundle, headerIsPreoptimized);
 
+            // 如果获得的是一个非空的新类
             if (newCls != cls  &&  newCls) {
                 // Class was moved but not deleted. Currently this occurs 
                 // only when the new class resolved a future class.
                 // Non-lazily realize the class below.
+                
+                // 类被移动了，但是没有被删除，
+                // 这只会发生在新类 resolve 了一个 future 类的情况下
+                // 下面以非惰性的方法 realize 了 newCls
+                
+                // 为 resolvedFutureClasses 数组重新开辟一块更大的空间，并将原来的数据拷贝进来
                 resolvedFutureClasses = (Class *)
                     realloc(resolvedFutureClasses, 
                                       (resolvedFutureClassCount+1) 
                                       * sizeof(Class));
+                // 将 newCls 添加到数组的末尾，resolvedFutureClassCount 加 1
                 resolvedFutureClasses[resolvedFutureClassCount++] = newCls;
             }
         }
@@ -3115,14 +3188,23 @@ void _read_images(header_info **hList, uint32_t hCount)
     // Class list and nonlazy class list remain unremapped.
     // Class refs and super refs are remapped for message dispatching.
     
+    // fix up 重映射的类
+    // 类列表 和 非惰性的类列表 保持 unremapped (#疑问：什么意思？？？= = )
+    // Class ref 和 super refs 被重映射，以用于消息派发
+    
+    // 如果 remapped_class_map 不是空的
     if (!noClassesRemapped()) {
-        for (EACH_HEADER) {
+        for (EACH_HEADER) { // 遍历 hList
+            // 取得 header 中所有的类引用
             Class *classrefs = _getObjc2ClassRefs(hi, &count);
+            // 遍历这些类引用，fix-up 类引用，从重映射类表中取出新类，如果旧类新类不一致，就将新类赋给这个类引用
             for (i = 0; i < count; i++) {
                 remapClassRef(&classrefs[i]);
             }
             // fixme why doesn't test future1 catch the absence of this?
+            // 取得镜像中所有类的父类引用
             classrefs = _getObjc2SuperRefs(hi, &count);
+            // 遍历父类引用，将其 fix-up 了
             for (i = 0; i < count; i++) {
                 remapClassRef(&classrefs[i]);
             }
@@ -3132,20 +3214,22 @@ void _read_images(header_info **hList, uint32_t hCount)
     ts.log("IMAGE TIMES: remap classes");
 
     // Fix up @selector references
-    static size_t UnfixedSelectors;
-    sel_lock();
-    for (EACH_HEADER) {
+    static size_t UnfixedSelectors; // 记录 hList 中所有镜像中一共有多少 unfixed 的 selector
+    sel_lock(); // selLock 上写锁
+    for (EACH_HEADER) { // 遍历 hList
+        // 只处理没有预优化的，被预优化过的就跳过
         if (hi->isPreoptimized()) continue;
 
-        bool isBundle = hi->isBundle();
+        bool isBundle = hi->isBundle(); // 是否是 bundle
+        // 取得镜像中所有的 selector 引用
         SEL *sels = _getObjc2SelectorRefs(hi, &count);
-        UnfixedSelectors += count;
-        for (i = 0; i < count; i++) {
-            const char *name = sel_cname(sels[i]);
-            sels[i] = sel_registerNameNoLock(name, isBundle);
+        UnfixedSelectors += count; // 累加
+        for (i = 0; i < count; i++) { // 遍历刚才取出的 selector
+            const char *name = sel_cname(sels[i]); // 转为char * 字符串
+            sels[i] = sel_registerNameNoLock(name, isBundle); // 注册这个 selector 的名字
         }
     }
-    sel_unlock();
+    sel_unlock(); // selLock 释放写锁
 
     ts.log("IMAGE TIMES: fix up selector references");
 
@@ -3227,29 +3311,37 @@ void _read_images(header_info **hList, uint32_t hCount)
 
     ts.log("IMAGE TIMES: realize non-lazy classes");
 
+    
     // Realize newly-resolved future classes, in case CF manipulates them
-    if (resolvedFutureClasses) {
-        for (i = 0; i < resolvedFutureClassCount; i++) {
-            realizeClass(resolvedFutureClasses[i]);
+    if (resolvedFutureClasses) { // 如果存在被 resolved 的 future 类
+        for (i = 0; i < resolvedFutureClassCount; i++) { // 遍历这些被 resolved 的 future 类
+            realizeClass(resolvedFutureClasses[i]); // 将类 realize 了
+            // 设置这个类和这个类的子类们需要 raw isa
             resolvedFutureClasses[i]->setRequiresRawIsa(false/*inherited*/);
         }
-        free(resolvedFutureClasses);
+        free(resolvedFutureClasses); // 将 resolvedFutureClasses 释放了
     }    
 
     ts.log("IMAGE TIMES: realize future classes");
 
-    // Discover categories. 
-    for (EACH_HEADER) {
-        category_t **catlist = 
-            _getObjc2CategoryList(hi, &count);
-        for (i = 0; i < count; i++) {
+    
+    // Discover categories.
+    for (EACH_HEADER) { // 遍历 hList
+        // 取得 hi 镜像中的所有分类
+        category_t **catlist = _getObjc2CategoryList(hi, &count);
+        for (i = 0; i < count; i++) { // 遍历所有分类
             category_t *cat = catlist[i];
-            Class cls = remapClass(cat->cls);
+            Class cls = remapClass(cat->cls); // 得到分类所属的类的 live class
 
-            if (!cls) {
+            if (!cls) { // 如果 cls 为空
                 // Category's target class is missing (probably weak-linked).
                 // Disavow any knowledge of this category.
-                catlist[i] = nil;
+                
+                // 分类所属的类丢了，很多可能是 weak-linked 了
+                // 这个分类就是不可信的，完全没有什么鸟用了
+                
+                catlist[i] = nil; // 将这个分类从列表中删除
+                
                 if (PrintConnecting) {
                     _objc_inform("CLASS: IGNORING category \?\?\?(%s) %p with "
                                  "missing weak-linked target class", 
@@ -3261,15 +3353,26 @@ void _read_images(header_info **hList, uint32_t hCount)
             // Process this category. 
             // First, register the category with its target class. 
             // Then, rebuild the class's method lists (etc) if 
-            // the class is realized. 
+            // the class is realized.
+            
+            // 处理这个分类
+            // 首先，注册注册这个分类
+            // 然后，如果这个类已经是 realized 的话，就重新建立这个类的方法列表（把分类的方法添加进去）
+            
             bool classExists = NO;
+            
             if (cat->instanceMethods ||  cat->protocols  
-                ||  cat->instanceProperties) 
+                ||  cat->instanceProperties) // 如果分类中存在实例方法 or 协议 or 实例属性
             {
+                // 添加分类到所属的 cls 类上，即把这个分类添加到 cls 对应的所有 unattached 的分类的列表中
                 addUnattachedCategoryForClass(cat, cls, hi);
+                
+                // 如果 cls 类已经被 realized
                 if (cls->isRealized()) {
+                    // 就重新 methodize 一下 cls 类，里面会重新 attachCategories 一下所有未被 attach 的分类
+                    // 即把这些分类中的方法、协议、属性添加到 cls 类中
                     remethodizeClass(cls);
-                    classExists = YES;
+                    classExists = YES; // 标记类存在
                 }
                 if (PrintConnecting) {
                     _objc_inform("CLASS: found category -%s(%s) %s", 
@@ -3278,9 +3381,11 @@ void _read_images(header_info **hList, uint32_t hCount)
                 }
             }
 
+            // 如果分类中存在类方法 or 协议
             if (cat->classMethods  ||  cat->protocols  
                 /* ||  cat->classProperties */) 
             {
+                // 添加分类到所属类的 
                 addUnattachedCategoryForClass(cat, cls->ISA(), hi);
                 if (cls->ISA()->isRealized()) {
                     remethodizeClass(cls->ISA());
@@ -3452,6 +3557,10 @@ void prepare_load_methods(const headerType *mhdr)
 * Only handles MH_BUNDLE for now.
 * Locking: write-lock and loadMethodLock acquired by unmap_image
 **********************************************************************/
+// 卸载镜像，
+// 卸载分类，将分类从所属的类上移除，并从 loadable_categories 列表中移除，
+// 卸载类，将类从 loadable_classes 中移除，断开类和其他数据结构的关系，并将类销毁，
+// 调用者：unmap_image_nolock()
 void _unload_image(header_info *hi)
 {
     size_t count, i;
@@ -7377,6 +7486,7 @@ unsigned  objc_debug_taggedpointer_payload_lshift = TAG_PAYLOAD_LSHIFT;
 unsigned  objc_debug_taggedpointer_payload_rshift = TAG_PAYLOAD_RSHIFT;
 // objc_debug_taggedpointer_classes is defined in objc-msg-*.s
 
+// 禁止 tagged pointer
 static void
 disableTaggedPointers()
 {

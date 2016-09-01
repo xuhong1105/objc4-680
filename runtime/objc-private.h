@@ -393,10 +393,18 @@ __BEGIN_DECLS
    Never set for images outside the shared cache file itself.
 */
    
-// 文件的头部信息，可能是 .o 文件
+// Mach-O 格式全称为 Mach Object 文件格式的缩写，是 macOS/iOS 上可执行文件的格式
+// Mach-O 可以分为3个部分
+//     Header
+//     Segment
+//     Section
+// 而一个 Segment 是可以包含多个 Section 的，见配图 mach_o_segments.gif
+
+// 镜像应该指的就是可执行文件
+
 typedef struct header_info {
-    // 链表无疑了
-    struct header_info *next;
+
+    struct header_info *next; // 链表
     
     /* typedef struct mach_header_64 headerType;
      * mach_header_64 的注释：The 64-bit mach header appears at the very beginning of the object file for 62-bit architectures.

@@ -100,10 +100,11 @@ __BEGIN_DECLS
 // opt is initialized to ~0 to detect incorrect use before preopt_init()
 
 static const objc_opt_t *opt = (objc_opt_t *)~0;
-static bool preoptimized;
+static bool preoptimized; // 记录是否是预优化的
 
 extern const objc_opt_t _objc_opt_data;  // in __TEXT, __objc_opt_ro
 
+// 是否是预优化的
 bool isPreoptimized(void) 
 {
     return preoptimized;
@@ -130,7 +131,7 @@ objc_selopt_t *preoptimizedSelectors(void)
     return opt ? opt->selopt() : nil;
 }
 
-
+// 根据 name 取得预优化的协议，但是现在只返回 nil
 Protocol *getPreoptimizedProtocol(const char *name)
 {
     return nil;

@@ -151,7 +151,8 @@ static SEL search_builtins(const char *name)
     return nil;
 }
 
-
+// 注册 SEL 的名字
+// 调用者：sel_getUid() / sel_registerName() / sel_registerNameNoLock()
 static SEL __sel_registerName(const char *name, int lock, int copy) 
 {
     SEL result = 0;
@@ -198,6 +199,7 @@ SEL sel_registerName(const char *name) {
     return __sel_registerName(name, 1, 1);     // YES lock, YES copy
 }
 
+// 注册 SEL 的名字，不加锁
 SEL sel_registerNameNoLock(const char *name, bool copy) {
     return __sel_registerName(name, 0, copy);  // NO lock, maybe copy
 }

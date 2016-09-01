@@ -30,14 +30,18 @@
 
 // classref_t is not fixed up at launch; use remapClass() to convert
 
+// 取得镜像中所有的 selector 引用
 extern SEL *_getObjc2SelectorRefs(const header_info *hi, size_t *count);
 extern message_ref_t *_getObjc2MessageRefs(const header_info *hi, size_t *count);
+// 取得镜像中所有 objective-2.0 类的类引用
 extern Class*_getObjc2ClassRefs(const header_info *hi, size_t *count);
+// 取得镜像中所有 objective-2.0 类的父类引用
 extern Class*_getObjc2SuperRefs(const header_info *hi, size_t *count);
 // 获得镜像中所有 objective-2.0 类的列表
 extern classref_t *_getObjc2ClassList(const header_info *hi, size_t *count);
 // 获得镜像中所有 objective-2.0 且是非惰性的 类的 列表
 extern classref_t *_getObjc2NonlazyClassList(const header_info *hi, size_t *count);
+// 获得镜像中所有 objective-2.0 分类列表
 extern category_t **_getObjc2CategoryList(const header_info *hi, size_t *count);
 // 获得镜像中所有 objective-2.0 且是非惰性的 分类的 列表
 extern category_t **_getObjc2NonlazyCategoryList(const header_info *hi, size_t *count);
