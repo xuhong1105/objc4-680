@@ -50,7 +50,7 @@ static int loadable_classes_allocated = 0;
 
 // List of categories that need +load called (pending parent class +load)
 static struct loadable_category *loadable_categories = nil; // 需要执行 +load 的分类
-static int loadable_categories_used = 0;
+static int loadable_categories_used = 0; // loadable_categories 中元素的数量
 static int loadable_categories_allocated = 0;
 
 
@@ -93,6 +93,7 @@ void add_class_to_loadable_list(Class cls)
 * to its class. Schedule this category for +load after its parent class
 * becomes connected and has its own +load method called.
 **********************************************************************/
+// 将分类 cat 添加到 loadable_categories 列表中
 void add_category_to_loadable_list(Category cat)
 {
     IMP method;
@@ -128,15 +129,18 @@ void add_category_to_loadable_list(Category cat)
 * Class cls may have been loadable before, but it is now no longer 
 * loadable (because its image is being unmapped). 
 **********************************************************************/
+// 将 cls 类从 loadable_classes 列表中删除
+// 类原来可能是 loadable 的，但是现在它将不是 loadable 的，因为镜像已经被取消映射了
+// 调用者：_unload_image()
 void remove_class_from_loadable_list(Class cls)
 {
     loadMethodLock.assertLocked();
 
     if (loadable_classes) {
         int i;
-        for (i = 0; i < loadable_classes_used; i++) {
-            if (loadable_classes[i].cls == cls) {
-                loadable_classes[i].cls = nil;
+        for (i = 0; i < loadable_classes_used; i++) { // 遍历 loadable_classes 列表
+            if (loadable_classes[i].cls == cls) { // 找到匹配的类
+                loadable_classes[i].cls = nil; // 就将其从 loadable_classes 中删除，直接置为 nil
                 if (PrintLoading) {
                     _objc_inform("LOAD: class '%s' unscheduled for +load", 
                                  cls->nameForLogging());
@@ -153,15 +157,18 @@ void remove_class_from_loadable_list(Class cls)
 * Category cat may have been loadable before, but it is now no longer 
 * loadable (because its image is being unmapped). 
 **********************************************************************/
+// 将分类 cat 从 loadable_categories 列表中删除
+// 分类原来可能是 loadable 的，但是现在它将不是 loadable 的，因为镜像已经被取消映射了
+// 调用者：_unload_image()
 void remove_category_from_loadable_list(Category cat)
 {
     loadMethodLock.assertLocked();
 
-    if (loadable_categories) {
+    if (loadable_categories) { // 如果 loadable_categories 非空，即里面有元素才继续
         int i;
-        for (i = 0; i < loadable_categories_used; i++) {
-            if (loadable_categories[i].cat == cat) {
-                loadable_categories[i].cat = nil;
+        for (i = 0; i < loadable_categories_used; i++) { // 遍历 loadable_categories 的元素
+            if (loadable_categories[i].cat == cat) { // 如果有匹配的分类
+                loadable_categories[i].cat = nil; // 就将其从 loadable_categories 中删除，直接置为 nil
                 if (PrintLoading) {
                     _objc_inform("LOAD: category '%s(%s)' unscheduled for +load",
                                  _category_getClassName(cat), 

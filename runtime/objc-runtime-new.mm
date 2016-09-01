@@ -459,24 +459,32 @@ static void addUnattachedCategoryForClass(category_t *cat, Class cls, header_inf
 * Removes an unattached category.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 将分类 cat 从 cls 类的 unattached 分类列表中移除
 static void removeUnattachedCategoryForClass(category_t *cat, Class cls)
 {
     runtimeLock.assertWriting();
 
     // DO NOT use cat->cls! cls may be cat->cls->isa instead
-    NXMapTable *cats = unattachedCategories();
+    NXMapTable *cats = unattachedCategories(); // 取得存储所有没有被 attached 的分类的列表
     category_list *list;
 
+    // 从所有 unattached 的分类列表中取得 cls 类对应的所有没有被 attach 的分类列表
     list = (category_list *)NXMapGet(cats, cls);
-    if (!list) return;
+    if (!list) return; // 如果类列表不存在，就直接返回
 
     uint32_t i;
-    for (i = 0; i < list->count; i++) {
+    for (i = 0; i < list->count; i++) { // 遍历列表，找到匹配的分类
         if (list->list[i].cat == cat) {
-            // shift entries to preserve list order
+            // shift entries to preserve list order 保持列表的顺序
+            
+            // 原型：void * memmove( void* dest, const void* src, size_t count );
+            // memmove 用于从 src 拷贝 count 个字节到 dest，如果目标区域和源区域有重叠的话，
+            // memmove 能够保证源串在被覆盖之前将重叠区域的字节拷贝到目标区域中
+            // 这里是将 list 中从 i+1 位置开始的所有元素向前挪一个单位，这样原来 i 处的分类就被覆盖了
             memmove(&list->list[i], &list->list[i+1], 
                     (list->count-i-1) * sizeof(list->list[i]));
-            list->count--;
+            
+            list->count--; // 列表的数目减 1
             return;
         }
     }
@@ -493,6 +501,7 @@ static void removeUnattachedCategoryForClass(category_t *cat, Class cls)
  返回 cls 类的 unattached 分类列表，并且将其从 unattachedCategories 中删除
  调用者必须负责 unattached 分类列表 的释放
  第二个参数 realizing 压根儿没用
+ 调用者：methodizeClass() / remethodizeClass()
 **********************************************************************/
 static category_list *
 unattachedCategoriesForClass(Class cls, bool realizing)
@@ -507,12 +516,15 @@ unattachedCategoriesForClass(Class cls, bool realizing)
 * Deletes all unattached categories (loaded or not) for a class.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 移除 cls 的所有未 attach 的分类（无论是否 load）
+// 调用者：detach_class()
 static void removeAllUnattachedCategoriesForClass(Class cls)
 {
     runtimeLock.assertWriting();
 
+    // 将 category_map 中 cls 类对应的分类列表移除，并返回它
     void *list = NXMapRemove(unattachedCategories(), cls);
-    if (list) free(list);
+    if (list) free(list); // 如果存在这个列表，就将其释放了
 }
 
 
@@ -522,6 +534,7 @@ static void removeAllUnattachedCategoriesForClass(Class cls)
 * Locking: none
 **********************************************************************/
 // 取得 NSObject 类
+// 调用者：setInitialized() / updateCustomRR_AWZ()
 static Class classNSObject(void)
 {
     // NSObject 类本质上也是个 objc_class 对象，而且有且只有一个，名字就叫 OBJC_CLASS_$_NSObject
@@ -1879,10 +1892,9 @@ static void removeSubclass(Class supercls, Class subcls)
         ;
     assert(*cp == subcls);
     *cp = subcls->data()->nextSiblingClass; // 将 subcls 的下一个兄弟类赋给 *cp，即 下一个兄弟类代替了 subcls 的位置
-                                            // subcls 在这里不能被销毁，因为其他地方也存了它，
-                                            // 所以还有很多操作要做，见 detach_class()
+                                            // subcls 在这里不能被销毁，因为其他地方还要用它，见 detach_class()
     
-                                    // 如下图，就是单纯的链表移除元素的操作
+                                    // 如下图，就是单纯的链表移除节点的操作
                                     // A  ->  B  ->  C  ->  D  ->  nil
                                     //        |             ↑
                                     //        ---------------
@@ -3385,9 +3397,11 @@ void _read_images(header_info **hList, uint32_t hCount)
             if (cat->classMethods  ||  cat->protocols  
                 /* ||  cat->classProperties */) 
             {
-                // 添加分类到所属类的 
+                // 添加分类到所属类 cls 的元类中
                 addUnattachedCategoryForClass(cat, cls->ISA(), hi);
+                // 如果 cls 的元类已经 realized 过了
                 if (cls->ISA()->isRealized()) {
+                    // 就重新 methodize 一下 cls 类的元类
                     remethodizeClass(cls->ISA());
                 }
                 if (PrintConnecting) {
@@ -3400,18 +3414,23 @@ void _read_images(header_info **hList, uint32_t hCount)
 
     ts.log("IMAGE TIMES: discover categories");
 
-    // Category discovery MUST BE LAST to avoid potential races 
+    // Category discovery MUST BE LAST to avoid potential races（潜在的竞争）
     // when other threads call the new category code before 
     // this thread finishes its fixups.
 
-    // +load handled by prepare_load_methods()
+    // 搜索分类必须放在最后，防止其他线程在当前线程完成 fixup 之前就调用分类，导致竞争（即线程不安全）
+    // 这步走完了，就会进入 load_images 函数，调用类的 +load 方法
+    
+    // +load handled by prepare_load_methods() 这行的意思见上面
 
+    // 如果开启了调试 non-fragile 成员变量，就将所有类都 realize 了
+    // 但这仅限于 DEBUG，所以事实上的最后一步还是上面的 Category discovery
     if (DebugNonFragileIvars) {
         realizeAllClasses();
     }
 
 
-    // Print preoptimization statistics
+    // Print preoptimization statistics  打印预优化的统计信息，不用深究
     if (PrintPreopt) {
         static unsigned int PreoptTotalMethodLists;
         static unsigned int PreoptOptimizedMethodLists;
@@ -3557,56 +3576,70 @@ void prepare_load_methods(const headerType *mhdr)
 * Only handles MH_BUNDLE for now.
 * Locking: write-lock and loadMethodLock acquired by unmap_image
 **********************************************************************/
-// 卸载镜像，
-// 卸载分类，将分类从所属的类上移除，并从 loadable_categories 列表中移除，
-// 卸载类，将类从 loadable_classes 中移除，断开类和其他数据结构的关系，并将类销毁，
+// 卸载镜像，有两部分
+// 一、卸载分类，将分类从所属的类上移除，并从 loadable_categories 列表中移除，
+// 二、卸载类，将类从 loadable_classes 中移除，断开类和其他数据结构的关系，并将类销毁，
 // 调用者：unmap_image_nolock()
 void _unload_image(header_info *hi)
 {
     size_t count, i;
 
-    loadMethodLock.assertLocked();
+    loadMethodLock.assertLocked(); // loadMethodLock 和 runtimeLock 都必须事先上锁
     runtimeLock.assertWriting();
 
     // Unload unattached categories and categories waiting for +load.
 
-    category_t **catlist = _getObjc2CategoryList(hi, &count);
-    for (i = 0; i < count; i++) {
+    // 将正在等待执行 +load 的还未 attached 分类 和 已经 attached 的分类都卸载了
+    
+    category_t **catlist = _getObjc2CategoryList(hi, &count); // 取得镜像中的分类列表
+    for (i = 0; i < count; i++) { // 遍历分类列表
         category_t *cat = catlist[i];
         if (!cat) continue;  // category for ignored weak-linked class
-        Class cls = remapClass(cat->cls);
+                        // 如果分类为 nil，那么它所属的类是 weak-linked 的，
+                        // 见 read_images() 中 Discover categories 部分的操作，如果分类所属的类是 weak-linked，就会直接将分类移除
+        Class cls = remapClass(cat->cls); // 得到分类所属类的 重映射后的 类
         assert(cls);  // shouldn't have live category for dead class
+                      // 断言，因为不存在的类，不应该有分类，而是像上面的 weak-linked 类一样
 
         // fixme for MH_DYLIB cat's class may have been unloaded already
 
         // unattached list
-        removeUnattachedCategoryForClass(cat, cls);
+        removeUnattachedCategoryForClass(cat, cls); // 将分类 cat 从 cls 类的 unattached 分类列表中移除
 
         // +load queue
-        remove_category_from_loadable_list(cat);
+        remove_category_from_loadable_list(cat); // 将分类 cat 从 loadable_categories 列表中删除
     }
 
     // Unload classes.
+    // 卸载类
 
+    // 取得镜像中的类列表
     classref_t *classlist = _getObjc2ClassList(hi, &count);
 
     // First detach classes from each other. Then free each class.
     // This avoid bugs where this loop unloads a subclass before its superclass
 
-    for (i = 0; i < count; i++) {
-        Class cls = remapClass(classlist[i]);
+    // 首先断开类之间的关系，然后将它们销毁
+    // 这避免了循环中，子类在父类之前被卸载而导致BUG，为什么会导致 BUG 呢？？
+    // 因为父类与子类的继承关系是多叉树的结构，见 rw 中的 firstSubclass 和 nextSiblingClass，一个类的子类是以链表串起来的，
+    // detach_class 中断开与父类的关系，也是将自己从父类的继承树上摘除，见 removeSubclass()，
+    // 但是，如果其中的一个子类比父类先被销毁，那么它的 nextSiblingClass 指针也一并被销毁了，且上一个
+    // 子类的 nextSiblingClass 变成了野指针，即子类链表断了，这就没法儿继续玩了是不是
+    
+    for (i = 0; i < count; i++) { // 遍历类列表，断开类之间的关系
+        Class cls = remapClass(classlist[i]); // 取出每个类对应的重映射类 cls
         if (cls) {
-            remove_class_from_loadable_list(cls);
-            detach_class(cls->ISA(), YES);
-            detach_class(cls, NO);
+            remove_class_from_loadable_list(cls); // 将 cls 类从 loadable_classes 列表中删除
+            detach_class(cls->ISA(), YES); // 断开 cls 的元类和其他数据结构的关系，YES 代表是元类
+            detach_class(cls, NO); // 断开 cls 和其他数据结构的关系，NO 代表非元类
         }
     }
     
-    for (i = 0; i < count; i++) {
-        Class cls = remapClass(classlist[i]);
+    for (i = 0; i < count; i++) { // 遍历类列表，逐一将类释放
+        Class cls = remapClass(classlist[i]); // 取出每个类对应的重映射类 cls
         if (cls) {
-            free_class(cls->ISA());
-            free_class(cls);
+            free_class(cls->ISA()); // 释放 cls 类的元类
+            free_class(cls); // 释放 cls 类
         }
     }
     
@@ -7000,27 +7033,31 @@ Class objc_readClassPair(Class bits, const struct objc_image_info *info)
 * Call this before free_class.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// 断开一个类和其他数据结构的连接
+// 异常：不要将这个类从 +load 列表中移除（#疑问：什么意思？？）
+// 必须在 free_class 前被调用，见 _unload_image()
+// 调用者：_unload_image() / objc_disposeClassPair()
 static void detach_class(Class cls, bool isMeta)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 需要事先加上写锁
 
     // categories not yet attached to this class
-    removeAllUnattachedCategoriesForClass(cls);
+    removeAllUnattachedCategoriesForClass(cls); // 移除 cls 的所有未 attach 的分类（无论是否 load）
 
     // superclass's subclass list
-    if (cls->isRealized()) {
-        Class supercls = cls->superclass;
-        if (supercls) {
+    if (cls->isRealized()) { // 如果类已经 realize，那么类中就存了父类的信息，需要将这些有关父类的信息移除
+        Class supercls = cls->superclass; // 取得父类
+        if (supercls) { // 如果有父类，就将 cls 类从父类中移除
             removeSubclass(supercls, cls);
         }
     }
 
     // class tables and +load queue
-    if (!isMeta) {
-        removeNamedClass(cls, cls->mangledName());
-        removeRealizedClass(cls);
+    if (!isMeta) { // 如果不是元类，
+        removeNamedClass(cls, cls->mangledName()); // 则将 cls 类从 gdb_objc_realized_classes 列表中移除
+        removeRealizedClass(cls); // 将 cls 类从 realized_class_hash 哈希表中移除
     } else {
-        removeRealizedMetaclass(cls);
+        removeRealizedMetaclass(cls); // 如果是元类，则将 cls 从 realized_metaclass_hash 哈希表中移除
     }
 }
 
@@ -7031,46 +7068,50 @@ static void detach_class(Class cls, bool isMeta)
 * Call this after detach_class.
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 释放一个类
+// 必须在 detach_class() 之后被调用，比如 _unload_image() 中就是这么做的
+// 调用者：_unload_image() / objc_disposeClassPair()
 static void free_class(Class cls)
 {
     runtimeLock.assertWriting();
 
-    if (! cls->isRealized()) return;
+    if (! cls->isRealized()) return; // 如果 cls 还未 realize，就不必销毁，因为类里啥都没有
 
-    auto rw = cls->data();
-    auto ro = rw->ro;
+    auto rw = cls->data(); // 取得 rw
+    auto ro = rw->ro; // 取得 ro
 
-    cache_delete(cls);
+    cache_delete(cls); // 删除 cls 类的方法缓存
     
-    for (auto& meth : rw->methods) {
-        try_free(meth.types);
+    for (auto& meth : rw->methods) { // 遍历 rw 中的方法
+        try_free(meth.types); // 将方法中的 types 变量释放，因为那是在堆中分配的
     }
-    rw->methods.tryFree();
+    rw->methods.tryFree(); // 将方法列表数组整个释放了，那么其中的所有方法也一同被释放了
     
-    const ivar_list_t *ivars = ro->ivars;
-    if (ivars) {
-        for (auto& ivar : *ivars) {
+    const ivar_list_t *ivars = ro->ivars; // 取得 ro 中的成员变量列表
+    if (ivars) { // 如果成员变量列表存在
+        for (auto& ivar : *ivars) { // 遍历成员变量列表，释放每个成员变量的 offset、name、type 字段
             try_free(ivar.offset);
             try_free(ivar.name);
             try_free(ivar.type);
         }
-        try_free(ivars);
+        try_free(ivars); // 将整个成员列表释放
     }
 
-    for (auto& prop : rw->properties) {
+    for (auto& prop : rw->properties) { // 遍历 rw 中的属性，释放每个属性的 name、attributes 字段
         try_free(prop.name);
         try_free(prop.attributes);
     }
-    rw->properties.tryFree();
+    rw->properties.tryFree(); // 将整个属性列表数组释放
 
-    rw->protocols.tryFree();
+    rw->protocols.tryFree(); // 将协议列表数组释放
     
-    try_free(ro->ivarLayout);
+    try_free(ro->ivarLayout);  // 下面释放 ro 中的 ivarLayout、weakIvarLayout、name 字段
     try_free(ro->weakIvarLayout);
     try_free(ro->name);
-    try_free(ro);
-    try_free(rw);
-    try_free(cls);
+    
+    try_free(ro);  // 释放 ro
+    try_free(rw);  // 释放 rw
+    try_free(cls); // 最后将 cls 类本身也释放了
 }
 
 
