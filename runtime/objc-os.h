@@ -188,6 +188,7 @@ StoreReleaseExclusive(uintptr_t *dst, uintptr_t oldvalue __unused, uintptr_t val
 
 #elif __arm__  
 
+// 取出 src 地址处的数据，只取一个 unsigned long
 static ALWAYS_INLINE
 uintptr_t 
 LoadExclusive(uintptr_t *src)
@@ -199,6 +200,7 @@ static ALWAYS_INLINE
 bool 
 StoreExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)
 {
+    // 和下面的 x86_64 不一样，它用的是 libkern 中的 OSAtomic 做的，但是用法是完全一样的
     return OSAtomicCompareAndSwapPtr((void *)oldvalue, (void *)value, 
                                      (void **)dst);
 }
@@ -215,6 +217,7 @@ StoreReleaseExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)
 #elif __x86_64__  ||  __i386__
 
 static ALWAYS_INLINE
+// 取出 src 地址处的数据，只取一个 unsigned long 
 uintptr_t 
 LoadExclusive(uintptr_t *src)
 {
@@ -225,7 +228,8 @@ static ALWAYS_INLINE
 bool 
 StoreExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)
 {
-    // __sync_bool_compare_and_swap  是 GCC 内建的原子操作函数， 执行CAS操作，也就是 比较如果相等就swap，并且返回true，否则返回false。所以失败的线程都会进入while循环里去，忙等
+    // __sync_bool_compare_and_swap  是 GCC 内建的原子操作函数， 执行CAS操作，也就是 比较 dst 和 oldValue 如果相等就将 value 放到 dst 中，并且返回true，否则返回false。
+    // 所以失败的线程都会进入while循环里去，忙等，直到成功为止，例如：setHasAssociatedObjects()
     return __sync_bool_compare_and_swap((void **)dst, (void *)oldvalue, (void *)value);
 }
 

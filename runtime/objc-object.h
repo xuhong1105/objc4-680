@@ -258,33 +258,37 @@ objc_object::isTaggedPointer()
     return ((uintptr_t)this & TAG_MASK);
 }
 
-    
+// 对象是否有关联对象，默认是有关联对象的
+// 调用者：objc_destructInstance() / objc_removeAssociatedObjects()
 inline bool
 objc_object::hasAssociatedObjects()
 {
-    if (isTaggedPointer()) {
+    if (isTaggedPointer()) { // tagged pointer 不能有关联对象，见 setHasAssociatedObjects()
+                             // 但是默认依然返回 true
         return true;
     }
-    if (isa.indexed) {
-        return isa.has_assoc;
+    if (isa.indexed) { // 如果使用的是 non-pointer 的 isa
+        return isa.has_assoc; // 就返回 has_assoc，这个 bit 标记了是否有关联对象
     }
-    return true;
+    return true; // 默认是有关联对象的
 }
 
 
+// 设置有关联对象
 inline void
 objc_object::setHasAssociatedObjects()
 {
-    if (isTaggedPointer()) return;
+    if (isTaggedPointer()) return; // tagged pointer 不能存关联对象，所以直接返回了
 
  retry:
-    // LoadExclusive 里做了很玄妙的事情，完全看不懂，应该不用深究
+    // 取得 isa 中的 bits，&isa.bits 就是它的地址，从这个地址里取出一个 unsigned long
     isa_t oldisa = LoadExclusive(&isa.bits);
     isa_t newisa = oldisa;
-    if (!newisa.indexed) return;
-    if (newisa.has_assoc) return;
-    newisa.has_assoc = true;
+    if (!newisa.indexed) return; // 如果并不是优化过的 isa，就直接返回，因为压根儿不能存其他信息
+    if (newisa.has_assoc) return;// 如果已经有关联对象了，就直接返回，不用修改
+    newisa.has_assoc = true; // 否则将其中 has_assoc 这个 bit 置为 1
     if (!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits)) goto retry;
+            // 将新的 bits 存进 isa 中，如果失败了就重试一次，直到成功为止
 }
 
 
@@ -304,17 +308,18 @@ inline void
 objc_object::setWeaklyReferenced_nolock()
 {
  retry:
-    isa_t oldisa = LoadExclusive(&isa.bits);
+    isa_t oldisa = LoadExclusive(&isa.bits); // 取出老的 isa
     isa_t newisa = oldisa;
     // isa中没有indexed，则引用计数是由side table管理的
     // 必须在side table中设置有弱引用
     if (!newisa.indexed) {
         return sidetable_setWeaklyReferenced_nolock();
     }
-    // isa中原本已经是有弱引用，则不用修改
-    if (newisa.weakly_referenced) return;
-    // 原来没有弱引用，则修改为有弱引用
-    newisa.weakly_referenced = true;
+    
+    if (newisa.weakly_referenced) return; // isa中原本已经是有弱引用，则不用修改
+    
+    newisa.weakly_referenced = true; // 原来没有弱引用，则修改为有弱引用
+    
     // 修改指定地址的值
     // 这里是将isa.bits位置处的值，由oldisa.bits修改为newisa.bits
     // StoreExclusive 里用了__sync_bool_compare_and_swap内建函数，先比较后交换，如果中间失败了，就会返回false。
@@ -461,9 +466,13 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
 
     do {
         transcribeToSideTable = false;
-        oldisa = LoadExclusive(&isa.bits);
+        oldisa = LoadExclusive(&isa.bits); // 取出老的 isa
         newisa = oldisa;
-        if (!newisa.indexed) goto unindexed;
+        
+        if (!newisa.indexed) goto unindexed; // 如果 isa 不是 non-pointer isa，即不是优化过 isa，
+                                             // 那么所有引用计数都在 side table 里，
+                                             // 就直接跳转到 unindexed,
+        
         // don't check newisa.fast_rr; we already called any RR overrides
         // 正在析构，就不能 retain 了，很有道理
         if (tryRetain && newisa.deallocating) {
@@ -700,7 +709,7 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
     }
 
     // Really deallocate.
-    // 真正在 dealloc 操作 😝😝😝😝😝😝
+    // 真正的 dealloc 操作 😝😝😝😝😝😝
 
     if (sideTableLocked) sidetable_unlock();
 
@@ -714,10 +723,11 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
     
     // 装载失败，又要重新来一次，啊，卧槽
     if (!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits)) goto retry;
+    
     __sync_synchronize();
-    if (performDealloc) {
-        // 执行 dealloc，最终的 dealloc 还是由 SEL_dealloc 实现
-        // SEL_dealloc 里究竟干了啥呢
+    
+    if (performDealloc) { // 如果指定指定 dealloc
+        // 调用 dealloc 方法，SEL_dealloc 对应的 IMP 应该是 dealloc 函数
         ((void(*)(objc_object *, SEL))objc_msgSend)(this, SEL_dealloc);
     }
     return true;
@@ -729,24 +739,31 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
 
 
 // Equivalent to [this autorelease], with shortcuts if there is no override
+// 相当于调用 [this autorelease]
 inline id 
 objc_object::autorelease()
 {
     // UseGC is allowed here, but requires hasCustomRR.
-    assert(!UseGC  ||  ISA()->hasCustomRR());
+    assert(!UseGC  ||  ISA()->hasCustomRR()); // 可以用 GC，但是需要自定义 RR
 
-    if (isTaggedPointer()) {
+    if (isTaggedPointer()) { // tagged-pointer 压根儿不需要 autorelease
         return (id)this;
     }
-    if (! ISA()->hasCustomRR()) {
+    
+    if (! ISA()->hasCustomRR()) { // 如果没有自定义 RR，就直接调用 rootAutorelease() 函数，将对象放入自动释放池
+                                  // 这绕过了 objc_msgSend，不需要发消息，效率会高很多
         return rootAutorelease();
     }
 
+    // 有自定义 RR 的话，就需要发消息，objc_msgSend 会查找合适的 IMP 来处理
     return ((id(*)(objc_object *, SEL))objc_msgSend)(this, SEL_autorelease);
 }
 
 
 // Base autorelease implementation, ignoring overrides.
+// 基础的 autorelease 的实现，如果没有自定义的 RR 的话，就可以直接调用这个函数，将对象放入自动释放池
+// 这样，就绕过了 objc_msgSend，少了很多步骤，效率会高不少，见 objc_object::autorelease()
+// 调用者：autorelease() / _objc_rootAutorelease() / objc_object::autorelease()
 inline id 
 objc_object::rootAutorelease()
 {
@@ -795,7 +812,7 @@ objc_object::rootRetainCount()
 #else
 // not SUPPORT_NONPOINTER_ISA
 
-// not SUPPORT_NONPOINTER_ISA 的时候，引用计数都保存在 side table 中
+// 不支持 non-pointer isa 的时候，引用计数都保存在 side table 中
 // 所以少了很多判断逻辑，代码都很简单
     
 inline Class 

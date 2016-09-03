@@ -419,21 +419,38 @@ typedef uintptr_t protocol_ref_t;  // protocol_t *, but unremapped
 
 // 协议结构体，继承自 objc_object
 struct protocol_t : objc_object {
-    const char *mangledName;   // 重整后的协议名称
-                        // Name Mangling 是一种在编译过程中，将函数、变量的名称重新改编的机制。在 C++重载、namespace等操作符下，函数可以有同样的名字，编译器为了区分各个不同地方的函数，将各个函数通过编译器内定的算法，将函数改成唯一的名称。
-    struct protocol_list_t *protocols;  // #疑问：存的是属于哪个协议列表？
-    method_list_t *instanceMethods;  // 实例方法
-    method_list_t *classMethods;   // 类方法
-    method_list_t *optionalInstanceMethods; // 可选的实例方法
-    method_list_t *optionalClassMethods;  // 可选的类方法
-    property_list_t *instanceProperties;  // 实例属性，协议中也是可以添加属性的，
+    const char *mangledName;    // 重整后的协议名称，为了兼容 swift 协议而准备的，
+                                // 它在 objc_allocateProtocol() 中被赋值，
+                                // 普通 oc 的协议重整前后的名字是一样的，而 swift 的协议重整前后名字不一样，
+                                // 重整名字是编译器给出的，加了 swift 复杂前缀的，用于混编时区分 oc协议 和 swift协议，
+                                // 而 demangledName 重整前的名称，应该就是去掉前缀的正常的名字
+    
+    struct protocol_list_t *protocols;  // 子协议列表，见 protocol_addProtocol()
+                                        // 又可以称为 incorporated protocols 合并的协议
+    
+    method_list_t *instanceMethods;  // 必选(required)的实例方法
+    method_list_t *classMethods;   //  必选(required)的类方法
+    method_list_t *optionalInstanceMethods; // 可选(optional)的实例方法
+    method_list_t *optionalClassMethods;  // 可选(optional)的类方法
+    
+    property_list_t *instanceProperties;  // 实例属性，当前协议只支持 required 的实例属性，
+                                          // 协议中也是可以添加属性的，
                                           // 不知道会不会生成成员变量，但生成 set 和 get 方法是一定有的
                                           // 比如 NSObject 协议，就有几个 readonly 的属性
-    uint32_t size;   // sizeof(protocol_t) // protocol_t 的大小
+    
+    uint32_t size;   // 这个协议的大小，其中也包括了 extendedMethodTypes 整个数组的大小
     uint32_t flags;  // 标记 跟 PROTOCOL_FIXED_UP_1 / PROTOCOL_FIXED_UP_2 有关系
+    
     // Fields below this point are not always present on disk.
-    const char **extendedMethodTypes;
-    const char *_demangledName; // 重整前的名字
+    // 这句话的意思，好像是下面这几个成员变量不一定有，
+    // 所以用到它们的时候都检查了下 size 是否足够大，比如 hasExtendedMethodTypesField() 和 protocol_t::demangledName()
+    
+    const char **extendedMethodTypes; // 扩展方法类型数组，每个元素是一个扩展类型字符串
+    
+    const char *_demangledName; // 重整前的协议名称，为了兼容 swift 协议而准备的，
+                                // 普通 oc 的协议重整前后的名字是一样的，而 swift 的协议重整前后名字不一样
+                                // 见 demangledName()
+                                // demangledName 重整前的名称，应该就是去掉 swift 前缀的正常的名字
 
     const char *demangledName(); // 取得重整前的协议名称
 
@@ -444,11 +461,17 @@ struct protocol_t : objc_object {
     bool isFixedUp() const;
     void setFixedUp();
 
+    // 存在扩展方法类型的内存区域
     bool hasExtendedMethodTypesField() const {
+        // 整个协议的大小超过了 extendedMethodTypes 前面的成员变量的总大小
+        // 加上 extendedMethodTypes 指针本身的大小，那么 extendedMethodTypes 一定是有分配了内存的
         return size >= (offsetof(protocol_t, extendedMethodTypes) 
                         + sizeof(extendedMethodTypes));
     }
+    
+    // 是否有扩展方法类型
     bool hasExtendedMethodTypes() const {
+        // 协议里存在扩展方法类型的内存区域，且 extendedMethodTypes 不为空
         return hasExtendedMethodTypesField() && extendedMethodTypes;
     }
 };
@@ -457,21 +480,22 @@ struct protocol_t : objc_object {
 
 // 协议列表，注意，协议列表和 method_list_t 等不一样，没继承 entsize_list_tt
 // 我猜，可能是跟协议列表里存的变量类型有关系
-// protocol_ref_t list[0]; 数组里存的是协议的地址，而不是协议本身
+// protocol_ref_t list[0]; 数组里存的是协议的地址，即指针，而不是协议本身
 // 这与 entsize_list_tt 不一样，entsize_list_tt 中直接存了 Element first; 元素本身
+// 比如 method_list_t，继承自 entsize_list_tt，里面的元素就是 method_t，而不是 method_t *
 
 struct protocol_list_t {
     // count is 64-bit by accident（偶然的）.
     uintptr_t count;  // 列表中协议的总数
     protocol_ref_t list[0]; // variable-size
-                // protocol_ref_t 是 uintptr_t 的别名，就是 unsigned long,
-                // 也就是这个数组中存的元素是 protocol_t 结构体对象的地址
+                // 列表的首地址，列表中存的元素是 protocol_ref_t 结构体对象的地址，
+                // protocol_ref_t 与 protocol_t * 一模一样，但是用于未重映射的协议
 
     // 对象本身和所存储的所有协议的总大小
     size_t byteSize() const {
         // sizeof(*this) 是对象本身的大小
         // count*sizeof(list[0]) 是存储的所有协议的大小
-        // 因为成员变量 protocol_ref_t list[0] 存的只是数组的首地址，并不是第一个元素
+        // 因为成员变量 protocol_ref_t list[0] 存的只是第一个元素的地址，即数组首地址，而并不是第一个元素本身
         // 所以这里用了总数 count ，并不是 count-1，这与 entsize_list_tt 的做法是不一样的
         return sizeof(*this) + count*sizeof(list[0]);
     }
@@ -888,6 +912,7 @@ static struct _class_ro_t _OBJC_METACLASS_RO_$_AXPerson __attribute__ ((used, se
     0,
 };
 
+ // AXPerson 类的 ro
 static struct _class_ro_t _OBJC_CLASS_RO_$_AXPerson __attribute__ ((used, section ("__DATA,__objc_const"))) = {
     0,         // flags
     __OFFSETOFIVAR__(struct AXPerson, _name), // instanceStart  成员变量 _name 开始的位置
@@ -970,7 +995,7 @@ struct class_ro_t {
 *
  
  Element 是元数据类型，比如 method_t
- List 是元数据的列表类型
+ List 是元数据的列表类型，比如 method_list_t
  
  一个 list_array_tt 的值可能有三种情况：
  - 空的
@@ -1221,16 +1246,16 @@ class protocol_array_t :
 // RW 就是 Read Write 可读可写
 struct class_rw_t {
     
-    uint32_t flags; // 存了是否有 C++ 构造器、C++ 析构器、默认 allocWithZone 等信息
+    uint32_t flags; // 存了是否有 C++ 构造器、C++ 析构器、默认 RR 等信息
     
     uint32_t version; // 版本，元类是 7，普通类是 0
 
     const class_ro_t *ro; // 一个指向常量的指针，其中存储了当前类在编译期就已经确定的属性、方法以及遵循的协议
 
-    method_array_t methods;  // 方法数组，每个元素是一个指针，指向一个方法列表 method_list_t，
+    method_array_t methods;  // 方法列表数组，每个元素是一个指针，指向一个方法列表 method_list_t，
                              // 前面是分类方法列表，一个分类一个列表，base methods list放在最后
-    property_array_t properties; // 属性数组
-    protocol_array_t protocols;  // 遵循的协议数组
+    property_array_t properties; // 属性列表数组
+    protocol_array_t protocols;  // 协议列表数组
 
     Class firstSubclass;    // 第一个子类
     Class nextSiblingClass; // 兄弟类
@@ -1238,7 +1263,8 @@ struct class_rw_t {
                             // 从 foreach_realized_class_and_subclass_2 方法中对子类的遍历
                             // 可以看到确实是如此
 
-    char *demangledName; // demangled 后的名称，好像会拼接上其他的字符串
+    char *demangledName; // 重整前的名字，为了兼容 swift 而准备的，普通 OC 类，重整前后的名字是一样的，
+                         // 而 swift 类重整前后的名字不一样，见 objc_class::demangledName()
 
     // 将 set 给定的 bit 位设为 1
     void setFlags(uint32_t set) 
@@ -1266,7 +1292,8 @@ struct class_rw_t {
         do {
             oldf = flags;
             newf = (oldf | set) & ~clear;
-        } while (!OSAtomicCompareAndSwap32Barrier(oldf, newf, (volatile int32_t *)&flags)); // 比较 oldf 和 flags内存处的值，可能就是保证中间过程中，flags处的值没变化
+        } while (!OSAtomicCompareAndSwap32Barrier(oldf, newf, (volatile int32_t *)&flags));
+                     // 比较 oldf 和 flags内存处的值，可能就是保证中间过程中，flags处的值没变化
                      // 如果比较结果是一样的，那么就将 newf 存到 flags 处
     }
 };
@@ -1562,8 +1589,8 @@ public:
 // RW : Read Write   RO : Read Only
 
 // 1. 在 realized 之前，class_data_bits_t 里的 bits 存的是 class_ro_t，
-// 2. realized 时，class_data_bits_t 里的 bits 存 class_rw_t ，
-//    class_rw_t 有一个变量存 class_ro_t
+// 2. realized 后，class_data_bits_t 里的 bits 存 class_rw_t ，
+//        class_rw_t 有一个变量存 class_ro_t
 
 // http://7ni3rk.com1.z0.glb.clouddn.com/Runtime/class-diagram.jpg
 // 元类的 isa 指向根元类，根元类的 isa 指向自己
@@ -1803,9 +1830,9 @@ struct objc_class : objc_object {
         return ISA() == (Class)this; // 根元类的 isa 指向自己
     }
 
-    // 取得 mangled（重整）名称
-    // Name Mangling 是一种在编译过程中，将函数、变量的名称重新改编的机制。在 C++重载、namespace等操作符下，函数可以有同样的名字，编译器为了区分各个不同地方的函数，将各个函数通过编译器内定的算法，将函数改成唯一的名称。
-    // 元类的 mangledName 存的可能是它的实例类，也就是它是这个叫 mangledName 的类的元类
+    // 取得重整后的名字，即 ro 中存的名字，
+    // 但是普通 OC 类，重整前后的名字是一样的
+    // 而 swift 类重整前后的名字不一样
     const char *mangledName() { 
         // fixme can't assert locks here
         assert(this);
@@ -1821,8 +1848,9 @@ struct objc_class : objc_object {
         }
     }
     
-    // 得到 demangledName，这个名字是正常的名字
+    // 得到 demangledName，即重整前的名字
     // 如果传入的参数 realize 是 false，那么类必须已经被 realized 或者 future
+    // 普通 OC 类，重整前后的名字是一样的，而 swift 类重整前后的名字不一样
     const char *demangledName(bool realize = false);
     const char *nameForLogging();
 

@@ -1172,7 +1172,7 @@ copyOneAttribute(unsigned int index, void *ctxa, void *ctxs,
     return YES;
 }
 
-                 
+// 从 attrs 属性的特性字符串中取出特性列表，outCount 是列表中元素个数
 objc_property_attribute_t *
 copyPropertyAttributeList(const char *attrs, unsigned int *outCount)
 {
@@ -1236,6 +1236,7 @@ findOneAttribute(unsigned int index, void *ctxa, void *ctxs,
     return YES;
 }
 
+// 拷贝 attrs 特性字符串中，指定 name 对应的 attribute 的值
 char *copyPropertyAttributeValue(const char *attrs, const char *name)
 {
     char *result = nil;

@@ -82,6 +82,7 @@
 #endif
 }
 
+// 取得协议的名字，是 demangledName，即正常的名字
 - (const char *)name
 {
     return protocol_getName(self);

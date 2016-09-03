@@ -86,15 +86,15 @@ typedef struct objc_object Protocol;
 #endif
 
 /// Defines a method
-struct objc_method_description {
-	SEL name;               /**< The name of the method */
-	char *types;            /**< The types of the method arguments */
+struct objc_method_description {  // 方法的描述结构体
+	SEL name;     // 方法名          /**< The name of the method */
+	char *types;  // 方法类型字符串   /**< The types of the method arguments */
 };
 
 /// Defines a property attribute
-typedef struct {
-    const char *name;           /**< The name of the attribute */
-    const char *value;          /**< The value of the attribute (usually empty) */
+typedef struct {     // 协议的特性
+    const char *name;      // 名称    /**< The name of the attribute */
+    const char *value;     // 特性值     /**< The value of the attribute (usually empty) */
 } objc_property_attribute_t;
 
 
@@ -1170,6 +1170,7 @@ OBJC_EXPORT BOOL protocol_isEqual(Protocol *proto, Protocol *other)
  * 
  * @return The name of the protocol \e p as a C string.
  */
+// 取得协议的名字，是 demangledName，即正常的名字
 OBJC_EXPORT const char *protocol_getName(Protocol *p)
      __OSX_AVAILABLE_STARTING(__MAC_10_5, __IPHONE_2_0);
 
@@ -1294,7 +1295,12 @@ OBJC_EXPORT void protocol_addMethodDescription(Protocol *proto, SEL name, const 
  * @param proto The protocol you want to add to, it must be under construction.
  * @param addition The protocol you want to incorporate into \e proto, it must be registered.
  */
-OBJC_EXPORT void protocol_addProtocol(Protocol *proto, Protocol *addition) 
+// Adds a registered protocol to another protocol that is under construction.
+// The protocol you want to add to (proto) must be under construction—allocated but not yet registered with the Objective-C runtime. The protocol you want to add (addition) must be registered already.
+// 添加一个已经注册了的协议到另一个正在构造中的协议里
+// 目的协议 proto 必须是正在被构造中(under construction—allocated)，且还未在 runtime 中注册，
+// 而被添加的协议 addition 必须是已经注册了的
+OBJC_EXPORT void protocol_addProtocol(Protocol *proto, Protocol *addition)
      __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_4_3);
 
 /** 

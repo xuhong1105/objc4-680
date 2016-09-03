@@ -414,7 +414,7 @@ typedef struct header_info {
     const objc_image_info *info;
     const char *fname;  // same as Dl_info.dli_fname
     bool loaded;
-    bool inSharedCache; // 标记镜像是否处于 shard cache 中
+    bool inSharedCache; // 标记镜像是否处于 shared cache 中
     bool allClassesRealized; // 标记镜像中所有类都被 realize 了
 
     // Do not add fields without editing ObjCModernAbstraction.hpp

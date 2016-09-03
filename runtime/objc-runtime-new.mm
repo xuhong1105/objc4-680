@@ -36,6 +36,7 @@
 #include <objc/message.h>
 #include <mach/shared_region.h>
 
+// 将 Protocol * 类型强转为 protocol_t * 类型
 #define newprotocol(p) ((protocol_t *)p)
 
 static void disableTaggedPointers();
@@ -204,7 +205,7 @@ disableSharedCacheOptimizations(void)
                                 // 这与上面的 Protocols 的非预优化版本在运行时取得的 fixed-up 值一致
 }
 
-// 查看 method_list_t 是否是 FixedUp 的
+// 查看 method_list_t 是否是经过 FixedUp 的
 bool method_list_t::isFixedUp() const {
     // 这个信息存在了 method_list_t 的 flag 里（method_list_t 继承自 entsize_list_tt）
     // 如果取出的 flag
@@ -1038,6 +1039,10 @@ static bool scanMangledField(const char *&string, const char *end,
 * Returns nil if the string doesn't look like a mangled Swift v1 name.
 * The result must be freed with free().
 **********************************************************************/
+// 取得指定的 Swift-v1-mangled 的类或协议的 demangled name，
+// 因为 swift 的类或协议的名字 会被重整为 swift 形式的名字，而现在，就是取得它们重整前的名字
+// 如果指定的类或协议压根儿就不是 swift 的，就会返回 nil，
+// 返回的结果字符串是堆上的，所以需要调用方释放
 static char *copySwiftV1DemangledName(const char *string, bool isProtocol = false)
 {
     if (!string) return nil;
@@ -1965,7 +1970,7 @@ static protocol_t *remapProtocol(protocol_ref_t proto)
 {
     runtimeLock.assertLocked();
 
-    // 先取得 proto 重整后的名字，然后用这个名字查找对应的新协议
+    // 用 proto 协议 重整后的名字 查找对应的新协议
     protocol_t *newproto = (protocol_t *)
         getProtocol(((protocol_t *)proto)->mangledName);
     return newproto ? newproto : (protocol_t *)proto; // 如果存在新协议，就返回，否则依然返回 proto
@@ -3655,14 +3660,15 @@ void _unload_image(header_info *hi)
 * Returns a pointer to this method's objc_method_description.
 * Locking: none
 **********************************************************************/
+// 返回方法的 objc_method_description
 struct objc_method_description *
 method_getDescription(Method m)
 {
     if (!m) return nil;
-    return (struct objc_method_description *)m;
+    return (struct objc_method_description *)m; // 强转为 objc_method_description * 类型，二者的前两个变量是一模一样的
 }
 
-
+// 返回方法的 IMP
 IMP 
 method_getImplementation(Method m)
 {
@@ -3677,6 +3683,7 @@ method_getImplementation(Method m)
 * The method must already have been fixed-up.
 * Locking: none
 **********************************************************************/
+// 返回方法的 SEL
 SEL 
 method_getName(Method m)
 {
@@ -3693,6 +3700,7 @@ method_getName(Method m)
 * The method must not be nil.
 * Locking: none
 **********************************************************************/
+// 返回方法的 type 字符串
 const char *
 method_getTypeEncoding(Method m)
 {
@@ -3706,49 +3714,60 @@ method_getTypeEncoding(Method m)
 * Sets this method's implementation to imp.
 * The previous implementation is returned.
 **********************************************************************/
+// 设置 cls 类中 m 方法的 IMP，会返回老的 IMP
+// 设置新的 IMP 后会清空方法缓存，并检查自定义 RR/AWZ
+// 调用者：addMethod() / method_setImplementation()
 static IMP 
 _method_setImplementation(Class cls, method_t *m, IMP imp)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 必须事先加写锁
 
-    if (!m) return nil;
+    if (!m) return nil;  // 方法和 IMP 都不能为空，否则没法儿玩
     if (!imp) return nil;
 
-    if (ignoreSelector(m->name)) {
+    if (ignoreSelector(m->name)) { // 判断方法是否需要被忽略，被忽略的方法永远都是被忽略的
         // Ignored methods stay ignored
         return m->imp;
     }
 
-    IMP old = m->imp;
-    m->imp = imp;
+    IMP old = m->imp; // 保存老的 IMP，留作最后返回
+    m->imp = imp; // 设置新的 IMP
 
     // Cache updates are slow if cls is nil (i.e. unknown)
     // RR/AWZ updates are slow if cls is nil (i.e. unknown)
     // fixme build list of classes whose Methods are known externally?
 
-    flushCaches(cls);
+    flushCaches(cls); // 因为 IMP 变了，所以 cls 类的方法缓存也失效了，需要将方法缓存清空
+                      // 注意，如果 cls == nil，flushCaches 会将所有类的方法缓存清空，这会很慢
 
-    updateCustomRR_AWZ(cls, m);
+    updateCustomRR_AWZ(cls, m); // 看 meth 方法是否是自定义 RR or AWZ，如果是的话，会做一些处理
+                                // 如果 cls == nil，就会检查所有类，这会很慢
 
     return old;
 }
 
+
+// 设置 m 方法的 IMP
+// 里面也调用了 _method_setImplementation，但与之不同的是加了锁，
+// 以及没有 cls 参数，即不指定这个方法是属于哪个类的，
+// 那么调用这个方法设置方法的 IMP 后，最后会清空所有类的方法缓存，检查所有类的 RR/AWZ，这个过程会很慢，效率低
 IMP 
 method_setImplementation(Method m, IMP imp)
 {
     // Don't know the class - will be slow if RR/AWZ are affected
     // fixme build list of classes whose Methods are known externally?
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
     return _method_setImplementation(Nil, m, imp);
 }
 
-
+// 交换方法的 IMP
 void method_exchangeImplementations(Method m1, Method m2)
 {
-    if (!m1  ||  !m2) return;
+    if (!m1  ||  !m2) return; // 两个方法都不能为空
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 必须加写锁
 
+    // 如果两个方法中有一个是需要被忽略的，那么很悲剧的是，现在，两个方法都是被忽略的了
     if (ignoreSelector(m1->name)  ||  ignoreSelector(m2->name)) {
         // Ignored methods stay ignored. Now they're both ignored.
         m1->imp = (IMP)&_objc_ignored_method;
@@ -3756,6 +3775,7 @@ void method_exchangeImplementations(Method m1, Method m2)
         return;
     }
 
+    // 用一个中间变量，实现两个 IMP 的交换
     IMP m1_imp = m1->imp;
     m1->imp = m2->imp;
     m2->imp = m1_imp;
@@ -3765,9 +3785,9 @@ void method_exchangeImplementations(Method m1, Method m2)
     // Cache updates are slow because class is unknown
     // fixme build list of classes whose Methods are known externally?
 
-    flushCaches(nil);
+    flushCaches(nil); // 因为不知道方法属于哪个类，所以需要清空所有类的方法缓存
 
-    updateCustomRR_AWZ(nil, m1);
+    updateCustomRR_AWZ(nil, m1); // 同样因为不知道方法属于哪个类，所以需要检查所有类的自定义 RR/AWZ
     updateCustomRR_AWZ(nil, m2);
 }
 
@@ -3777,6 +3797,7 @@ void method_exchangeImplementations(Method m1, Method m2)
 * fixme
 * Locking: none
 **********************************************************************/
+// 取得成员变量位于类对应的 IMPL 结构体中的偏移量
 ptrdiff_t
 ivar_getOffset(Ivar ivar)
 {
@@ -3790,6 +3811,7 @@ ivar_getOffset(Ivar ivar)
 * fixme
 * Locking: none
 **********************************************************************/
+// 取得成员遍历的名称
 const char *
 ivar_getName(Ivar ivar)
 {
@@ -3803,6 +3825,7 @@ ivar_getName(Ivar ivar)
 * fixme
 * Locking: none
 **********************************************************************/
+// 取得成员变量的 type 字符串
 const char *
 ivar_getTypeEncoding(Ivar ivar)
 {
@@ -3810,18 +3833,19 @@ ivar_getTypeEncoding(Ivar ivar)
     return ivar->type;
 }
 
-
-
+// 取得协议的名称
 const char *property_getName(objc_property_t prop)
 {
     return prop->name;
 }
 
+// 取得协议的特性字符串
 const char *property_getAttributes(objc_property_t prop)
 {
     return prop->attributes;
 }
 
+// 取得属性的特性列表，是一个堆中的数组，用 outCount 接收数组中元素的个数
 objc_property_attribute_t *property_copyAttributeList(objc_property_t prop, 
                                                       unsigned int *outCount)
 {
@@ -3830,15 +3854,20 @@ objc_property_attribute_t *property_copyAttributeList(objc_property_t prop,
         return nil;
     }
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
+    
+    // 从 prop->attributes 字符串中取出特性列表，并用 outCount 接收元素个数
     return copyPropertyAttributeList(prop->attributes,outCount);
 }
 
+// 拷贝 prop 属性中，指定 name 对应的 Attribute 的值
 char * property_copyAttributeValue(objc_property_t prop, const char *name)
 {
     if (!prop  ||  !name  ||  *name == '\0') return nil;
     
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
+    
+    // 拷贝 prop->attributes 字符串中，指定 name 对应的 attribute 的值，并返回
     return copyPropertyAttributeValue(prop->attributes, name);
 }
 
@@ -3850,40 +3879,70 @@ char * property_copyAttributeValue(objc_property_t prop, const char *name)
 * b is the index of m in m's method list
 * a+b is the index of m's extended types in the extended types array
 **********************************************************************/
-static void getExtendedTypesIndexesForMethod(protocol_t *proto, const method_t *m, bool isRequiredMethod, bool isInstanceMethod, uint32_t& a, uint32_t &b)
+// 获得 proto 协议中 m 方法的扩展类型位于 扩展类型 数组(extendedMethodTypes)中的索引
+// 这个索引值与 m 方法位于所有方法列表中的索引位置的值是相等的
+// 协议中的方法列表有 instanceMethods、classMethods、optionalInstanceMethods、optionalClassMethods
+// isRequiredMethod: 是否是 required 的方法(与 optional 相对)
+// isInstanceMethod: 是否是实例方法(与类方法相对)
+// a 和 b 都是输出参数，
+// a 是 m 所在的方法列表之前的所有方法列表中的方法个数
+// b 是 m 方法位于 m 所在的方法列表的索引
+// a + b 是 m 方法的扩展类型(extended types)位于扩展类型数组(extendedMethodTypes)中的索引
+// 调用者：fixupProtocolMethodList() / getExtendedTypesIndexForMethod()
+static void getExtendedTypesIndexesForMethod(protocol_t *proto, const method_t *m,
+                                             bool isRequiredMethod, bool isInstanceMethod,
+                                             uint32_t& a, uint32_t &b)
 {
-    a = 0;
+    a = 0; // a 初始化为 0
 
-    if (proto->instanceMethods) {
-        if (isRequiredMethod && isInstanceMethod) {
-            b = proto->instanceMethods->indexOfMethod(m);
-            return;
+    if (proto->instanceMethods) { // 如果 proto 中存在实例方法
+        if (isRequiredMethod && isInstanceMethod) { // 且 m 方法既是 required 的，也是实例方法，
+                                                    // 则 m 方法位于第一个方法列表 instanceMethods 中
+            b = proto->instanceMethods->indexOfMethod(m); // 取得 m 方法在 instanceMethods 列表中的索引，赋值给 b
+                                                          // 因为 instanceMethods 是第一个列表，所以 a = 0,
+                                                          // a 在上面已经初始化为 0 过了
+            return; // 直接返回
         }
-        a += proto->instanceMethods->count;
+        
+        a += proto->instanceMethods->count; // 如果 m 方法不在 instanceMethods 中
+                                            // 则将 instanceMethods 的方法总数累加到 a 中
     }
 
-    if (proto->classMethods) {
-        if (isRequiredMethod && !isInstanceMethod) {
-            b = proto->classMethods->indexOfMethod(m);
+    if (proto->classMethods) { // 如果 proto 中存在类方法
+        if (isRequiredMethod && !isInstanceMethod) { // 且 m 方法是 required 的，且是类方法
+                                                     // 则 m 方法位于第二个方法列表 classMethods 中
+            b = proto->classMethods->indexOfMethod(m); // 取得 m 方法在 instanceMethods 列表中的索引，赋值给 b
             return;
         }
-        a += proto->classMethods->count;
+        a += proto->classMethods->count; // 如果 m 方法不在 classMethods 中
+                                         // 则将 classMethods 的方法总数累加到 a 中
     }
 
-    if (proto->optionalInstanceMethods) {
-        if (!isRequiredMethod && isInstanceMethod) {
+    if (proto->optionalInstanceMethods) { // 如果 proto 中存在可选的实例方法
+        if (!isRequiredMethod && isInstanceMethod) { // 且 m 方法是 optional 的，且是实例方法
+                                                     // 则 m 方法位于第三个方法列表 optionalInstanceMethods 中
             b = proto->optionalInstanceMethods->indexOfMethod(m);
+                                                     // 取得 m 方法在 optionalInstanceMethods 列表中的索引，赋值给 b
             return;
         }
-        a += proto->optionalInstanceMethods->count;
+        a += proto->optionalInstanceMethods->count; // 如果 m 方法不在 optionalInstanceMethods 中
+                                                    // 则将 optionalInstanceMethods 的方法总数累加到 a 中
     }
 
-    if (proto->optionalClassMethods) {
-        if (!isRequiredMethod && !isInstanceMethod) {
+    if (proto->optionalClassMethods) { // 如果 proto 中存在可选的类方法
+        if (!isRequiredMethod && !isInstanceMethod) { // 且 m 方法是 optional 的，且是类方法
+                                                      // 则 m 方法位于第四个方法列表 optionalClassMethods 中
             b = proto->optionalClassMethods->indexOfMethod(m);
+                                                      // 取得 m 方法在 optionalClassMethods 列表中的索引，赋值给 b
+            
             return;
         }
-        a += proto->optionalClassMethods->count;
+        a += proto->optionalClassMethods->count; // 如果 m 方法不在 optionalClassMethods 中
+                                            // 则将 optionalClassMethods 的方法总数累加到 a 中
+        
+        // 如果走到这里，说明在协议中没有找到 m 方法，这就尴尬了，
+        // 为什么这里没有给 b 赋值呢？不过，好像赋什么值都不大合适
+        // 也没有返回值标识有没有找到
     }
 }
 
@@ -3892,10 +3951,14 @@ static void getExtendedTypesIndexesForMethod(protocol_t *proto, const method_t *
 * getExtendedTypesIndexForMethod
 * Returns the index of m's extended types in proto's extended types array.
 **********************************************************************/
+// 获得 proto 协议中 m 方法的扩展类型位于 扩展类型 数组(extendedMethodTypes)中的索引，
+// 内部实际调用的是 getExtendedTypesIndexesForMethod()，详情见 getExtendedTypesIndexesForMethod()
+// 调用者：protocol_getMethodTypeEncoding_nolock()
 static uint32_t getExtendedTypesIndexForMethod(protocol_t *proto, const method_t *m, bool isRequiredMethod, bool isInstanceMethod)
 {
     uint32_t a;
     uint32_t b;
+    // 调用 getExtendedTypesIndexesForMethod()
     getExtendedTypesIndexesForMethod(proto, m, isRequiredMethod, 
                                      isInstanceMethod, a, b);
     return a + b;
@@ -3906,36 +3969,58 @@ static uint32_t getExtendedTypesIndexForMethod(protocol_t *proto, const method_t
 * fixupProtocolMethodList
 * Fixes up a single method list in a protocol.
 **********************************************************************/
+// fix-up 协议中的单独的一个方法列表
 static void
 fixupProtocolMethodList(protocol_t *proto, method_list_t *mlist,  
-                        bool required, bool instance)
+                        bool required/*是否必选*/, bool instance/*是否是实例方法*/)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 必须事先加写锁
 
-    if (!mlist) return;
-    if (mlist->isFixedUp()) return;
+    if (!mlist) return; // 如果方法列表不存在，就直接返回
+    
+    if (mlist->isFixedUp()) return; // 如果方法列表已经被 fixup 过了，就不用再 fixup 一次，直接返回，
 
+    // 取得 proto 里是否有扩展方法类型
     bool hasExtendedMethodTypes = proto->hasExtendedMethodTypes();
+    
+    // 将 mlist 方法列表 fixup 了
+    // 第二个参数是 true，表示需要从 bundle 中拷贝
+    // 第三个参数是 !hasExtendedMethodTypes，表示如果没有扩展方法类型，就需要排序，否则
+    //    底下的代码会负责做排序的工作
     fixupMethodList(mlist, true/*always copy for simplicity*/,
                     !hasExtendedMethodTypes/*sort if no ext*/);
     
-    if (hasExtendedMethodTypes) {
+    if (hasExtendedMethodTypes) { // 存在扩展方法类型，那么就需要在这里进行排序
         // Sort method list and extended method types together.
         // fixupMethodList() can't do this.
         // fixme COW stomp
-        uint32_t count = mlist->count;
-        uint32_t prefix;
-        uint32_t junk;
+        
+        // 存在扩展方法类型的方法列表，extendedMethodTypes 里的顺序是需要和几个方法列表中方法的顺序是保持一致的，
+        // 即 方法 和 它的扩展类型 必须时刻保持一一对应，所以 extendedMethodTypes 也需要一同排序
+        // 因为 fixupMethodList() 做不了这个，所以必须在这里做
+        
+        uint32_t count = mlist->count; // mlist 中的方法数
+        uint32_t prefix; // 用来接收 mlist 之前的所有方法列表中的方法总个数
+        uint32_t junk;   // 用来接收 &mlist->get(0) 这个方法位于 mlist 中的索引，其实是废话啦
+                         // 摆明了是第一个，因为取到了之后也压根儿没用
+        
+        // 取得 mlist 之前的所有方法列表中方法的总个数 prefix
         getExtendedTypesIndexesForMethod(proto, &mlist->get(0), 
                                          required, instance, prefix, junk);
+        
+        // 取得扩展方法类型数组
         const char **types = proto->extendedMethodTypes;
+        
+        // 那么 mlist 中的方法对应的扩展类型就是：types[prefix+0] ~ types[prefix+count-1]
+        
+        // 遍历 mlist 中的方法，利用冒泡排序，将 name 地址小的方法排前面，顺便调换扩展类型的位置
         for (uint32_t i = 0; i < count; i++) {
             for (uint32_t j = i+1; j < count; j++) {
                 method_t& mi = mlist->get(i);
                 method_t& mj = mlist->get(j);
-                if (mi.name > mj.name) {
-                    std::swap(mi, mj);
-                    std::swap(types[prefix+i], types[prefix+j]);
+                if (mi.name > mj.name) { // mi.name 的地址 小于 mj.name 的地址，就交换，即地址小的排前面
+                    std::swap(mi, mj); // 交换 mi 和 mj 的值
+                    std::swap(types[prefix+i], types[prefix+j]); // 交换对应位置上的扩展类型的值
                 }
             }
         }
@@ -3947,25 +4032,33 @@ fixupProtocolMethodList(protocol_t *proto, method_list_t *mlist,
 * fixupProtocol
 * Fixes up all of a protocol's method lists.
 **********************************************************************/
+// fixup 指定的协议，其实是 fixup 协议里的4个方法列表
+// 但是不会检查 proto 原来是否已经被 fixedup，检查的步骤会在 fixupProtocolIfNeeded() 中做
+// 调用者：fixupProtocolIfNeeded()
 static void 
 fixupProtocol(protocol_t *proto)
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // 需要事先加写锁
 
+    // 如果 proto 协议存在子协议
     if (proto->protocols) {
+        // 遍历 proto 协议的子协议
         for (uintptr_t i = 0; i < proto->protocols->count; i++) {
+            // 取得每个子协议重映射后的协议
             protocol_t *sub = remapProtocol(proto->protocols->list[i]);
+            // 如果该子协议还未被 fixed-up，就将它 fix-up 了
             if (!sub->isFixedUp()) fixupProtocol(sub);
         }
     }
 
+    // 以下逐一 fixup 该协议的 4 个方法列表
     fixupProtocolMethodList(proto, proto->instanceMethods, YES, YES);
     fixupProtocolMethodList(proto, proto->classMethods, YES, NO);
     fixupProtocolMethodList(proto, proto->optionalInstanceMethods, NO, YES);
     fixupProtocolMethodList(proto, proto->optionalClassMethods, NO, NO);
 
     // fixme memory barrier so we can check this with no lock
-    proto->setFixedUp();
+    proto->setFixedUp(); // 将该协议设置为已经被 fixed-up
 }
 
 
@@ -3974,21 +4067,28 @@ fixupProtocol(protocol_t *proto)
 * Fixes up all of a protocol's method lists if they aren't fixed up already.
 * Locking: write-locks runtimeLock.
 **********************************************************************/
+// 首先会检查 proto 协议是否是 fixed-up 的，如果不是，会调用 fixupProtocol() 将其 fix-up 了
+// 调用者：_protocol_getMethodTypeEncoding() / protocol_copyMethodDescriptionList() / protocol_getMethod()
 static void 
 fixupProtocolIfNeeded(protocol_t *proto)
 {
-    runtimeLock.assertUnlocked();
+    runtimeLock.assertUnlocked(); // 确定 runtimeLock 没有加锁，因为 runtimeLock 是不可重入的
+                                  // 如果原来是加锁了的，后面再加锁一次，就死锁了
     assert(proto);
 
-    if (!proto->isFixedUp()) {
-        rwlock_writer_t lock(runtimeLock);
-        fixupProtocol(proto);
+    if (!proto->isFixedUp()) { // 如果还没有 fix-up
+        rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
+        fixupProtocol(proto); // 调用 fixupProtocol() 将其 fix-up 了
     }
 }
 
-
+// 取得 proto 协议中指定的方法列表，
+// required 和 instance 决定了要获取的是哪个列表
+// 调用者：protocol_copyMethodDescriptionList() / protocol_getMethod_nolock()
 static method_list_t *
-getProtocolMethodList(protocol_t *proto, bool required, bool instance)
+getProtocolMethodList(protocol_t *proto,
+                      bool required/*是否必选*/,
+                      bool instance/*是否是实例方法*/)
 {
     method_list_t **mlistp = nil;
     if (required) {
@@ -4013,36 +4113,46 @@ getProtocolMethodList(protocol_t *proto, bool required, bool instance)
 * protocol_getMethod_nolock
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 取得 proto 协议中符合指定条件的方法
+// sel: 指定的 SEL
+// isRequiredMethod: 是否是 required 的方法，如果不是就是 optional 的
+// isInstanceMethod: 是否是实例方法，如果不是，就是类方法
+// recursive: 是否递归，即是否去 protocols 子协议列表中递归查找
+// 调用者：protocol_getMethod() / protocol_getMethodTypeEncoding_nolock()
 static method_t *
 protocol_getMethod_nolock(protocol_t *proto, SEL sel, 
                           bool isRequiredMethod, bool isInstanceMethod, 
                           bool recursive)
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // runtimeLock 必须事先加锁
 
-    if (!proto  ||  !sel) return nil;
+    if (!proto  ||  !sel) return nil; // proto 和 sel 缺一不可
 
-    assert(proto->isFixedUp());
+    assert(proto->isFixedUp()); // proto 必须是经过 fixed-up 的
 
+    // 获得协议中符合条件的一个方法列表
     method_list_t *mlist = 
         getProtocolMethodList(proto, isRequiredMethod, isInstanceMethod);
-    if (mlist) {
+    if (mlist) { // 如果有符合条件的方法列表，就从该方法列表中找到匹配 sel 的方法
         method_t *m = search_method_list(mlist, sel);
-        if (m) return m;
+        if (m) return m; // 如果找到了，就将方法返回
     }
 
-    if (recursive  &&  proto->protocols) {
+    if (recursive  &&  proto->protocols) { // 如果指定了需要递归查找，且该协议确实有子协议
         method_t *m;
+        // 遍历子协议
         for (uint32_t i = 0; i < proto->protocols->count; i++) {
+            // 先取得该子协议对应重映射后的协议 realProto
             protocol_t *realProto = remapProtocol(proto->protocols->list[i]);
+            // 递归调用 protocol_getMethod_nolock 从 realProto 中查找符合条件的方法
             m = protocol_getMethod_nolock(realProto, sel, 
                                           isRequiredMethod, isInstanceMethod, 
                                           true);
-            if (m) return m;
+            if (m) return m; // 如果找到了，就直接将方法返回，不再继续查找
         }
     }
 
-    return nil;
+    return nil; // 最后还找到，就返回 nil
 }
 
 
@@ -4051,13 +4161,17 @@ protocol_getMethod_nolock(protocol_t *proto, SEL sel,
 * fixme
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 取得 proto 协议中符合指定条件的方法，调用 protocol_getMethod_nolock() 完成查找
+// 但多了 fixup 和 加锁 两个步骤
 Method 
 protocol_getMethod(protocol_t *proto, SEL sel, bool isRequiredMethod, bool isInstanceMethod, bool recursive)
 {
     if (!proto) return nil;
-    fixupProtocolIfNeeded(proto);
+    fixupProtocolIfNeeded(proto); // 检查 proto 协议是否是 fixed-up 的，如果不是，会将其 fix-up 了
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
+    
+    // 调用 protocol_getMethod_nolock() 完成查找
     return protocol_getMethod_nolock(proto, sel, isRequiredMethod, 
                                      isInstanceMethod, recursive);
 }
@@ -4069,6 +4183,8 @@ protocol_getMethod(protocol_t *proto, SEL sel, bool isRequiredMethod, bool isIns
 * Returns nil if the compiler did not emit any extended @encode data.
 * Locking: runtimeLock must be held for writing by the caller
 **********************************************************************/
+// 取得 proto 协议中符合指定条件的方法的类型字符串，这个是不加锁版本，调用方需要加锁
+// 调用者：_protocol_getMethodTypeEncoding()
 const char * 
 protocol_getMethodTypeEncoding_nolock(protocol_t *proto, SEL sel, 
                                       bool isRequiredMethod, 
@@ -4076,31 +4192,41 @@ protocol_getMethodTypeEncoding_nolock(protocol_t *proto, SEL sel,
 {
     runtimeLock.assertLocked();
 
-    if (!proto) return nil;
+    if (!proto) return nil; // 协议为空，那还找个屁，直接返回 nil
+    
+    // 如果协议没有扩展方法类型，直接返回 nil
     if (!proto->hasExtendedMethodTypes()) return nil;
 
-    assert(proto->isFixedUp());
+    assert(proto->isFixedUp()); // 协议必须是 fixed-up 的
 
+    // 取得符合指定条件的方法
     method_t *m = 
         protocol_getMethod_nolock(proto, sel, 
                                   isRequiredMethod, isInstanceMethod, false);
-    if (m) {
+    
+    if (m) { // 如果存在符合条件的 m 方法
+        // 获得 m 方法的扩展类型位于 扩展类型数组(extendedMethodTypes) 中的索引 i
         uint32_t i = getExtendedTypesIndexForMethod(proto, m, 
                                                     isRequiredMethod, 
                                                     isInstanceMethod);
+        // 返回 i 索引处的扩展类型字符串
         return proto->extendedMethodTypes[i];
     }
 
-    // No method with that name. Search incorporated protocols.
-    if (proto->protocols) {
+    // No method with that name. Search incorporated protocols(合并的协议，即子协议).
+    // 在 proto 协议中找不到匹配的方法，就尝试去它的子协议中找
+    
+    if (proto->protocols) { // 如果存在子协议列表
+        // 遍历子协议列表
         for (uintptr_t i = 0; i < proto->protocols->count; i++) {
+            // 递归查找每个子协议
             const char *enc = 
                 protocol_getMethodTypeEncoding_nolock(remapProtocol(proto->protocols->list[i]), sel, isRequiredMethod, isInstanceMethod);
-            if (enc) return enc;
+            if (enc) return enc; // 找到就返回
         }
     }
 
-    return nil;
+    return nil; // 如果子协议里也没有，就返回 nil
 }
 
 /***********************************************************************
@@ -4109,16 +4235,20 @@ protocol_getMethodTypeEncoding_nolock(protocol_t *proto, SEL sel,
 * Returns nil if the compiler did not emit any extended @encode data.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 取得 proto 协议中符合指定条件的方法的类型字符串，调用 protocol_getMethodTypeEncoding_nolock() 完成查找，
+// 比它多的步骤是 fixup 和 加读锁
 const char * 
 _protocol_getMethodTypeEncoding(Protocol *proto_gen, SEL sel, 
                                 BOOL isRequiredMethod, BOOL isInstanceMethod)
 {
-    protocol_t *proto = newprotocol(proto_gen);
+    protocol_t *proto = newprotocol(proto_gen); // 强转为 protocol_t * 类型
 
     if (!proto) return nil;
-    fixupProtocolIfNeeded(proto);
+    fixupProtocolIfNeeded(proto); // 检查 proto 是否是已经 fixed-up 的，如果没有，就将其 fix-up 了
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
+    
+    // 调用 protocol_getMethodTypeEncoding_nolock() 完成查找
     return protocol_getMethodTypeEncoding_nolock(proto, sel, 
                                                  isRequiredMethod, 
                                                  isInstanceMethod);
@@ -4134,17 +4264,25 @@ _protocol_getMethodTypeEncoding(Protocol *proto_gen, SEL sel,
 const char *
 protocol_t::demangledName()
 {
+    // 断言检查 size 是否正确，如果 size 太小，_demangledName 压根就不存在
     assert(size >= offsetof(protocol_t, _demangledName)+sizeof(_demangledName));
     
-    if (! _demangledName) {
+    if (! _demangledName) { // _demangledName == nil，即还没有 _demangledName
+        
+        // 取得 mangledName 对应的 _demangledName，如果它不是 swift 协议，就会返回 nil
         char *de = copySwiftV1DemangledName(mangledName, true/*isProtocol*/);
-        if (! OSAtomicCompareAndSwapPtrBarrier(nil, (void*)(de ?: mangledName), 
+        
+        // 如果 de == nil，即不是 swift 协议，就用 mangledName 代替
+        // 所以可以得出结论，普通 oc 协议重整前后的名字是一样的，只有 swift 协议是不一样的
+        // 可能原来都没重整名字，后来为了兼容 swift，才加了这个
+        // 将 de 存入 _demangledName
+        if (! OSAtomicCompareAndSwapPtrBarrier(nil, (void*)(de ?: mangledName),
                                                (void**)&_demangledName)) 
         {
-            if (de) free(de);
+            if (de) free(de); // 如果 de 非空，就将其释放，因为它是在堆中分配的，见 copySwiftV1DemangledName()
         }
     }
-    return _demangledName;
+    return _demangledName; // 将 _demangledName 返回
 }
 
 /***********************************************************************
@@ -4152,11 +4290,17 @@ protocol_t::demangledName()
 * Returns the (Swift-demangled) name of the given protocol.
 * Locking: runtimeLock must not be held by the caller
 **********************************************************************/
+// 取得协议的名字，是 demangledName，即正常的名字
+// #疑问：不明白为什么调用者不能对 runtimeLock 加锁，函数体内也没有再加锁过呀，调用者加了锁好像也没问题啊
 const char *
 protocol_getName(Protocol *proto)
 {
-    if (!proto) return "nil";
-    else return newprotocol(proto)->demangledName();
+    if (!proto) {
+        return "nil"; // 如果 proto 是 nil，就返回 nil
+    }
+    else {
+        return newprotocol(proto)->demangledName(); // 否则，返回 proto 重整前的名字
+    }
 }
 
 
@@ -4165,15 +4309,24 @@ protocol_getName(Protocol *proto)
 * Returns the description of a named instance method.
 * Locking: runtimeLock must not be held by the caller
 **********************************************************************/
+// 取得协议中符合条件的方法的 objc_method_description
+// 调用者不能对 runtimeLock 加锁，因为 protocol_getMethod 方法中对 runtimeLock 加锁了，
+// 而 runtimeLock 是不可重入的，一个线程上二次加锁，会造成死锁
 struct objc_method_description 
 protocol_getMethodDescription(Protocol *p, SEL aSel, 
                               BOOL isRequiredMethod, BOOL isInstanceMethod)
 {
+    // 用 protocol_getMethod 查找匹配条件的方法
     Method m = 
         protocol_getMethod(newprotocol(p), aSel, 
                            isRequiredMethod, isInstanceMethod, true);
-    if (m) return *method_getDescription(m);
-    else return (struct objc_method_description){nil, nil};
+    
+    if (m) {
+        return *method_getDescription(m); // 找到了匹配的方法，就取得方法的 objc_method_description，并返回
+    }
+    else {
+        return (struct objc_method_description){nil, nil}; // 否则返回一个空的 objc_method_description
+    }
 }
 
 
@@ -4182,35 +4335,47 @@ protocol_getMethodDescription(Protocol *p, SEL aSel,
 * Returns YES if self conforms to other.
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
+// self 协议是否 conforms to(符合，遵从？) other 协议，
+// 按下面代码的意思，就是 self 协议本身以及它的子协议中是否有一个协议与 other 协议的 mangledName 相同
+// 这是一个递归函数，
+// 还是个无锁版本
+// 调用者：class_conformsToProtocol() / protocol_conformsToProtocol()
 static bool 
 protocol_conformsToProtocol_nolock(protocol_t *self, protocol_t *other)
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // runtimeLock 需要被事先加锁
 
-    if (!self  ||  !other) {
+    if (!self  ||  !other) { // self 和 other 有一个为 nil，那都不可能符合，就返回 NO，停止递归
         return NO;
     }
 
     // protocols need not be fixed up
 
+    // 如果 self 协议本身 和 other 协议的 mangledName 就相同，就直接返回 YES，停止递归
     if (0 == strcmp(self->mangledName, other->mangledName)) {
         return YES;
     }
 
-    if (self->protocols) {
+    // 否则，接着查 self 的子协议
+    
+    if (self->protocols) { // 如果存在子协议
         uintptr_t i;
+        // 遍历子协议
         for (i = 0; i < self->protocols->count; i++) {
+            // 取得重映射后的子协议
             protocol_t *proto = remapProtocol(self->protocols->list[i]);
+            // 如果有子协议的 mangledName 和 other 协议的 mangledName 相同，就返回 YES，停止递归
             if (0 == strcmp(other->mangledName, proto->mangledName)) {
                 return YES;
             }
+            // 递归查找子协议的子协议中是否有符合的
             if (protocol_conformsToProtocol_nolock(proto, other)) {
                 return YES;
             }
         }
     }
 
-    return NO;
+    return NO; // 找不到就返回 NO
 }
 
 
@@ -4219,9 +4384,12 @@ protocol_conformsToProtocol_nolock(protocol_t *self, protocol_t *other)
 * Returns YES if self conforms to other.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// protocol_conformsToProtocol_nolock() 的有锁版本
+// 调用者：-conformsTo: / protocol_isEqual()
 BOOL protocol_conformsToProtocol(Protocol *self, Protocol *other)
 {
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 上了读锁
+    
     return protocol_conformsToProtocol_nolock(newprotocol(self), 
                                               newprotocol(other));
 }
@@ -4232,11 +4400,16 @@ BOOL protocol_conformsToProtocol(Protocol *self, Protocol *other)
 * Return YES if two protocols are equal (i.e. conform to each other)
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 两个协议是否相等，即是否等价
 BOOL protocol_isEqual(Protocol *self, Protocol *other)
 {
-    if (self == other) return YES;
-    if (!self  ||  !other) return NO;
+    if (self == other) return YES; // 如果二者地址都一样，那还比什么，直接返回 YES
+    
+    if (!self  ||  !other) return NO; // 如果其中有一个是 nil，也不用比，肯定不相等，返回 NO
 
+    // 先看 self 是否 conforms to other
+    // 再看 other 是否 conforms to self
+    // 只有互相 conform ，两个协议才是等价的
     if (!protocol_conformsToProtocol(self, other)) return NO;
     if (!protocol_conformsToProtocol(other, self)) return NO;
 
@@ -4249,38 +4422,50 @@ BOOL protocol_isEqual(Protocol *self, Protocol *other)
 * Returns descriptions of a protocol's methods.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 返回协议中符合条件的方法列表中所有方法的 descriptions，
+// 返回值是一个数组，里面每个元素是一个方法的 objc_method_description，
+// outCount 是输出参数，记录了数组中的元素个数
 struct objc_method_description *
 protocol_copyMethodDescriptionList(Protocol *p, 
-                                   BOOL isRequiredMethod,BOOL isInstanceMethod,
-                                   unsigned int *outCount)
+                                   BOOL isRequiredMethod, // 是否是 required 方法，与 optional 相对
+                                   BOOL isInstanceMethod, // 是否是实例方法，与类方法相对
+                                   unsigned int *outCount) // 输出参数，记录了数组中的元素个数
 {
     protocol_t *proto = newprotocol(p);
     struct objc_method_description *result = nil;
     unsigned int count = 0;
 
-    if (!proto) {
+    if (!proto) { // 如果协议本身就是 nil，没法儿玩，将元素个数置为 0 后，直接返回 nil
         if (outCount) *outCount = 0;
         return nil;
     }
 
     fixupProtocolIfNeeded(proto);
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
 
+    // 取出符合条件的方法列表
     method_list_t *mlist = 
         getProtocolMethodList(proto, isRequiredMethod, isInstanceMethod);
 
-    if (mlist) {
+    if (mlist) { // 方法列表不为空，即里面有方法
+        
+        // 在堆中为数组开辟足够的空间，mlist->count + 1 个单位，每个单位 sizeof(struct objc_method_description) 的大小
+        // calloc 会将这片内存初始化为 0
+        // 疑问：为什么是 mlist->count + 1 个单位呢，多出来的那 1 个单位是干嘛用的
         result = (struct objc_method_description *)
             calloc(mlist->count + 1, sizeof(struct objc_method_description));
+        
+        // 遍历方法列表，填充 descriptions 数组
         for (const auto& meth : *mlist) {
             result[count].name = meth.name;
             result[count].types = (char *)meth.types;
-            count++;
+            count++; // 元素总数加 1
         }
     }
 
-    if (outCount) *outCount = count;
+    if (outCount) *outCount = count; // 不等于 0，就将 count 赋值给输出参数 outCount
+    
     return result;
 }
 
@@ -4290,17 +4475,23 @@ protocol_copyMethodDescriptionList(Protocol *p,
 * fixme
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 从 proto 协议中取得指定名称的属性
+// 调用者：protocol_getProperty()
 static property_t * 
-protocol_getProperty_nolock(protocol_t *proto, const char *name, 
-                            bool isRequiredProperty, bool isInstanceProperty)
+protocol_getProperty_nolock(protocol_t *proto,
+                            const char *name, // 属性名
+                            bool isRequiredProperty, // 是否是 required 的属性，当前只支持 required 的
+                            bool isInstanceProperty) // 是否是实例，当前也只支持实例属性
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // runtimeLock 需要实现上锁
 
+    // 当前只支持 required 的实例属性，所以，optional 的 或者 非实例属性，都直接返回 nil
     if (!isRequiredProperty  ||  !isInstanceProperty) {
         // Only required instance properties are currently supported
         return nil;
     }
 
+    // 遍历实例属性列表，如果找到属性名为 name 的属性，就将其返回
     property_list_t *plist;
     if ((plist = proto->instanceProperties)) {
         for (auto& prop : *plist) {
@@ -4310,10 +4501,14 @@ protocol_getProperty_nolock(protocol_t *proto, const char *name,
         }
     }
 
+    // proto 协议中没有找到，就去它的子协议中找
     if (proto->protocols) {
         uintptr_t i;
+        // 遍历子协议列表，
         for (i = 0; i < proto->protocols->count; i++) {
+            // 取得重映射后的子协议
             protocol_t *p = remapProtocol(proto->protocols->list[i]);
+            // 递归调用本函数，寻找匹配的属性
             property_t *prop = 
                 protocol_getProperty_nolock(p, name, 
                                             isRequiredProperty, 
@@ -4325,12 +4520,15 @@ protocol_getProperty_nolock(protocol_t *proto, const char *name,
     return nil;
 }
 
+// protocol_getProperty_nolock() 的有锁版本
 objc_property_t protocol_getProperty(Protocol *p, const char *name, 
                               BOOL isRequiredProperty, BOOL isInstanceProperty)
 {
-    if (!p  ||  !name) return nil;
+    if (!p  ||  !name) return nil; // 协议和名字缺一不可
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
+    
+    // 调用 protocol_getProperty_nolock() 进行查找的工作
     return (objc_property_t)
         protocol_getProperty_nolock(newprotocol(p), name, 
                                     isRequiredProperty, isInstanceProperty);
@@ -4425,6 +4623,7 @@ protocol_copyProtocolList(Protocol *p, unsigned int *outCount)
 * Returns nil if a protocol with the same name already exists.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 开辟一个协议
 Protocol *
 objc_allocateProtocol(const char *name)
 {
@@ -4492,6 +4691,9 @@ void objc_registerProtocol(Protocol *proto_gen)
 * `proto` must be under construction. `addition` must not.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 添加一个已经注册了的协议到另一个正在构造中的协议里
+// 目的协议 proto_gen 必须是正在被构造中(under construction—allocated)，且还未在 runtime 中注册，
+// 而被添加的协议 addition_gen 必须是已经注册了的
 void 
 protocol_addProtocol(Protocol *proto_gen, Protocol *addition_gen) 
 {
@@ -5127,9 +5329,10 @@ objc_class::nameForLogging()
 * If realize=false, the class must already be realized or future.
 * Locking: If realize=true, runtimeLock must be held for writing by the caller.
 **********************************************************************/
-// 得到 objc_class 类对象的 demangledName，这个名字是正常的名字
+// 取得 demangledName 重整前的名字
 // 如果传入的参数 realize 是 false，那么类必须已经被 realized 或者 future
 // 否则就会对类做 realize 操作
+// 调用者：_objc_copyClassNamesForImage() / class_getName()
 const char *
 objc_class::demangledName(bool realize)
 {
@@ -5142,9 +5345,10 @@ objc_class::demangledName(bool realize)
     }
 
     // Try demangling the mangled name.
-    // 先拿到 mangled 的名称
+    // 先拿到 mangled 的名字，即重整前的名字
     const char *mangled = mangledName();
-    // 然后进行 Demangled
+    
+    // 然后进行 demangled，那么如果它是 swift 类，就会取得重整前的名字，否则得到的是 nil
     char *de = copySwiftV1DemangledName(mangled);
     
     // 如果类已经 Realized 或者 future
@@ -5154,7 +5358,8 @@ objc_class::demangledName(bool realize)
         // We may not own rwlock for writing so use an atomic operation instead.
         
         // 就将 de 拷贝到 class_rw_t 中的 demangledName 所处的内存处
-        // 如果 de 是空的，就用 mangled 代替
+        // 如果 de 是 nil，即本类不是 swift 类，就用 mangled name 代替，
+        // 所以普通 oc 类的 mangledName 和 demangledName 是相同的
         if (! OSAtomicCompareAndSwapPtrBarrier(nil, (void*)(de ?: mangled), 
                                                (void**)&data()->demangledName)) 
         {
@@ -5163,12 +5368,13 @@ objc_class::demangledName(bool realize)
                 free(de);
             }
         }
-        return data()->demangledName;
+        return data()->demangledName; // 返回重整后的名字
     }
 
     // Class is not yet realized.
     // 类既没有 realized ,也没有 future，才会走到这里
-    // 如果 de 是空的，这时名称还没有被 mangled，就直接返回 mangled
+    // 如果 de 是空的，即本类不是 swift 类，因为普通 oc 类的 mangledName 和 demangledName 是相同的
+    // 所以直接返回 mangledName 就好了
     if (!de) {
         // Name is not mangled. Return it without caching.
         return mangled;
@@ -5177,18 +5383,20 @@ objc_class::demangledName(bool realize)
     // Class is not yet realized and name is mangled. Realize the class.
     // Only objc_copyClassNamesForImage() should get here.
     // 类既没有 realized ,也没有 future，
-    // 但是上面拿到的 de 不是空的，也就是说名称已经被 mangled 了
-    // 才会走到这里
+    // 但是上面拿到的 de 不是空的，说明本类是 swift 类，但是还未 realized or future
+    // 只有 _objc_copyClassNamesForImage() 调用本函数，才会走到这里
     
-    // 加上写锁
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 需要事先加上写锁
+    
     assert(realize); // 确保到这里的时候，传入的 realize 是 true
+    
     if (realize) {
         realizeClass((Class)this);  // 对类做 realize 操作
         data()->demangledName = de; // 将 de 赋值给 demangledName
         return de;  // 这里 demangledName 指向了 de，de 会在 class 销毁时一并被释放，所以没有内存泄漏
     } else {
-        return de;  // bug - just leak   因为 de 在堆中，没有被 free，所以会有内存泄漏
+        return de;  // bug - just leak
+                    // 见 copySwiftV1DemangledName() 因为 de 在堆中，没有被 free，所以会有内存泄漏
     }
 }
 
@@ -6172,6 +6380,7 @@ void objc_class::setRequiresRawIsa(bool inherited)
 /***********************************************************************
 * Update custom RR and AWZ when a method changes its IMP
 **********************************************************************/
+// 看 meth 方法是否是自定义 RR or AWZ，如果是的话，会做一些处理
 static void
 updateCustomRR_AWZ(Class cls, method_t *meth)
 {

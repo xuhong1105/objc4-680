@@ -422,7 +422,7 @@ weak_entry_for_referent(weak_table_t *weak_table, objc_object *referent)
 // 这个方法只在 storeWeak 中用到，用于解除 __weak pointer 对旧值的弱引用
 // 与 weak_register_no_lock 相反
 void
-weak_unregister_no_lock(weak_table_t *weak_table, // 弱引用表
+weak_unregister_no_lock(weak_table_t *weak_table, // 全局的弱引用表
                         id referent_id, // 指针指向的旧值
                         id *referrer_id) // 指针
 {
