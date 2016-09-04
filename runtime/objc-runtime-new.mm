@@ -2956,7 +2956,7 @@ readProtocol(protocol_t *newproto, Class protocol_class,
     // 根据新协议的重整名称，去 protocol_map 映射表中查找老的协议
     protocol_t *oldproto = (protocol_t *)getProtocol(newproto->mangledName);
 
-    if (oldproto) { // 如果存在老的协议
+    if (oldproto) { // 如果存在老的协议，就只报个警告，因为不允许有重名的协议
         // Some other definition already won.
         if (PrintProtocols) {
             _objc_inform("PROTOCOLS: protocol at %p is %s  "
@@ -3004,7 +3004,7 @@ readProtocol(protocol_t *newproto, Class protocol_class,
         }
     }
     else if (newproto->size >= sizeof(protocol_t)) { // 如果不存在老的协议，且没有经过预优化，且新协议的大小
-                                                     // 比 protocol_t 的最初的尺寸要大
+                                                     // 比 protocol_t 的标准尺寸要大
         // New protocol from an un-preoptimized image
         // with sufficient storage. Fix it up in place.
         // fixme duplicate protocols from unloadable bundle
@@ -3016,17 +3016,26 @@ readProtocol(protocol_t *newproto, Class protocol_class,
                          newproto, newproto->nameForLogging());
         }
     }
-    else { // 实在看不懂了
-        // New protocol from an un-preoptimized image 
+    else { // 如果不存在老的协议，且没有经过预优化，且新协议的大小比 protocol_t 的标准尺寸要小
+        
+        // New protocol from an un-preoptimized image
         // with insufficient storage. Reallocate it.
         // fixme duplicate protocols from unloadable bundle
+        
+        // 取大的 size，这里按照上面的逻辑，应该是 sizeof(protocol_t)
         size_t size = max(sizeof(protocol_t), (size_t)newproto->size);
+        // 新建一个 installedproto 协议，在堆中分配内存，并清零
         protocol_t *installedproto = (protocol_t *)calloc(size, 1);
+        // 将 newproto 内存上的内容 拷贝到 installedproto 中
         memcpy(installedproto, newproto, newproto->size);
+        // 将 installedproto->size 设为新的 size
         installedproto->size = (__typeof__(installedproto->size))size;
         
-        installedproto->initIsa(protocol_class);  // fixme pinned
+        installedproto->initIsa(protocol_class); // 设置 isa  // fixme pinned
+        
+        // 将 installedproto 插入 protocol_map 映射表中
         insertFn(protocol_map, installedproto->mangledName, installedproto);
+        
         if (PrintProtocols) {
             _objc_inform("PROTOCOLS: protocol at %p is %s  ", 
                          installedproto, installedproto->nameForLogging());
@@ -3251,7 +3260,7 @@ void _read_images(header_info **hList, uint32_t hCount)
     ts.log("IMAGE TIMES: fix up selector references");
 
 #if SUPPORT_FIXUP
-    // Fix up old objc_msgSend_fixup call sites
+    // Fix up old objc_msgSend_fixup call sites  fixup 老的 objc_msgSend_fixup
     for (EACH_HEADER) {
         message_ref_t *refs = _getObjc2MessageRefs(hi, &count);
         if (count == 0) continue;
@@ -4540,40 +4549,53 @@ objc_property_t protocol_getProperty(Protocol *p, const char *name,
 * fixme
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 拷贝出协议的 plist 实例属性列表，
+// 返回值是数组，元素是属性的地址，outCount 是输出参数，记录属性的个数
+// 并不是深拷贝，数组确实是在堆上分配的，但是每个元素指向的属性还是那些属性，
+// 调用者：protocol_copyPropertyList()
 static property_t **
 copyPropertyList(property_list_t *plist, unsigned int *outCount)
 {
     property_t **result = nil;
-    unsigned int count = 0;
+    unsigned int count = 0; // 记录属性的个数
 
     if (plist) {
         count = plist->count;
     }
 
     if (count > 0) {
+        // 为数组在堆中分配足够大的内存，分配 count+1 个单位，是为了在最后一个单位上存 nil
         result = (property_t **)malloc((count+1) * sizeof(property_t *));
 
+        // 遍历属性列表
         count = 0;
         for (auto& prop : *plist) {
-            result[count++] = &prop;
+            result[count++] = &prop; // 将每个属性的地址存入数组中
         }
-        result[count] = nil;
+        result[count] = nil; // 最后一个元素存 nil
     }
 
-    if (outCount) *outCount = count;
+    if (outCount) *outCount = count; // 总数赋值给 outCount
+    
     return result;
 }
 
+// 拷贝出 proto 协议的实例属性列表，
+// 返回值是新的列表，内存不一样，但是列表里记录的属性地址是一模一样的
+// outCount 是输出参数，记录了属性的个数
 objc_property_t *protocol_copyPropertyList(Protocol *proto, unsigned int *outCount)
 {
-    if (!proto) {
+    if (!proto) { // 如果协议为空，没法儿玩，直接返回 nil
         if (outCount) *outCount = 0;
         return nil;
     }
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
 
+    // 取得原来的属性列表
     property_list_t *plist = newprotocol(proto)->instanceProperties;
+    
+    // 调用 copyPropertyList 拷贝出属性列表，并将其返回
     return (objc_property_t *)copyPropertyList(plist, outCount);
 }
 
@@ -4584,34 +4606,41 @@ objc_property_t *protocol_copyPropertyList(Protocol *proto, unsigned int *outCou
 * Does not copy those protocol's incorporated protocols in turn.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 拷贝出协议中的 incorporated protocols (子协议，也可以称为被合并的协议)
+// 并不按顺序拷贝，#疑问：不明白这是什么意思，子协议之间还有顺序？？
+// 返回值是一个数组，每个元素是协议的地址
 Protocol * __unsafe_unretained * 
-protocol_copyProtocolList(Protocol *p, unsigned int *outCount)
+protocol_copyProtocolList(Protocol *p,
+                          unsigned int *outCount/*输出参数，记录子协议的数量*/)
 {
     unsigned int count = 0;
     Protocol **result = nil;
-    protocol_t *proto = newprotocol(p);
+    protocol_t *proto = newprotocol(p); // 强转为 protocol_t 类型
     
-    if (!proto) {
+    if (!proto) { //如果协议为空，没法儿玩，直接返回 nil
         if (outCount) *outCount = 0;
         return nil;
     }
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
 
     if (proto->protocols) {
-        count = (unsigned int)proto->protocols->count;
+        count = (unsigned int)proto->protocols->count; // 记录子协议的数量
     }
     if (count > 0) {
+        // 为结果数组在堆中分配足够大的内存空间
         result = (Protocol **)malloc((count+1) * sizeof(Protocol *));
 
+        // 遍历 proto->protocols，将子协议一一插入结果数组中
         unsigned int i;
         for (i = 0; i < count; i++) {
             result[i] = (Protocol *)remapProtocol(proto->protocols->list[i]);
         }
-        result[i] = nil;
+        result[i] = nil; // 数组的最后一个元素是 nil
     }
 
     if (outCount) *outCount = count;
+    
     return result;
 }
 
@@ -4623,28 +4652,37 @@ protocol_copyProtocolList(Protocol *p, unsigned int *outCount)
 * Returns nil if a protocol with the same name already exists.
 * Locking: acquires runtimeLock
 **********************************************************************/
-// 开辟一个协议
+// 创建一个新协议，这个协议在 objc_registerProtocol() 调用前是不会被使用的
+// 协议不能重名，如果给定的协议名称已经存在了，就返回 nil
+// 名字是重整后的名字
 Protocol *
 objc_allocateProtocol(const char *name)
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
-    if (getProtocol(name)) {
+    if (getProtocol(name)) { // 协议不能重名，如果给定的协议名称已经存在了，就返回 nil
         return nil;
     }
 
+    // 为新协议在堆中分配内存，并清零
     protocol_t *result = (protocol_t *)calloc(sizeof(protocol_t), 1);
 
+    // 取得别处定义的一个 objc_class 结构体对象，它被用作未注册的协议的 cls
     extern objc_class OBJC_CLASS_$___IncompleteProtocol;
     Class cls = (Class)&OBJC_CLASS_$___IncompleteProtocol;
-    result->initProtocolIsa(cls);
-    result->size = sizeof(protocol_t);
+    
+    // 从 objc_registerProtocol() 函数中可以看到
+    // 注册前的协议，它的 cls 是 OBJC_CLASS_$___IncompleteProtocol
+    // 注册后的协议，它的 cls 会变成 OBJC_CLASS_$_Protocol
+    
+    result->initProtocolIsa(cls); // 设置新协议的 isa
+    result->size = sizeof(protocol_t); // 新协议的大小
     // fixme mangle the name if it looks swift-y?
-    result->mangledName = strdup(name);
+    result->mangledName = strdup(name); // 新协议的名字
 
     // fixme reserve name without installing
 
-    return (Protocol *)result;
+    return (Protocol *)result; // 返回新协议
 }
 
 
@@ -4654,23 +4692,27 @@ objc_allocateProtocol(const char *name)
 * ready for use and immutable.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 注册一个新创建的协议
 void objc_registerProtocol(Protocol *proto_gen) 
 {
-    protocol_t *proto = newprotocol(proto_gen);
+    protocol_t *proto = newprotocol(proto_gen); // 强转为 protocol_t *
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
+    // 注册前的 cls，代表不完整的协议
     extern objc_class OBJC_CLASS_$___IncompleteProtocol;
     Class oldcls = (Class)&OBJC_CLASS_$___IncompleteProtocol;
+    
+    // 注册后的 cls
     extern objc_class OBJC_CLASS_$_Protocol;
     Class cls = (Class)&OBJC_CLASS_$_Protocol;
 
-    if (proto->ISA() == cls) {
+    if (proto->ISA() == cls) { // 如果协议已经被注册过了，就报警告
         _objc_inform("objc_registerProtocol: protocol '%s' was already "
                      "registered!", proto->nameForLogging());
         return;
     }
-    if (proto->ISA() != oldcls) {
+    if (proto->ISA() != oldcls) { // 如果协议的 cls 不等于 oldcls，则在 objc_allocateProtocol() 中有错误
         _objc_inform("objc_registerProtocol: protocol '%s' was not allocated "
                      "with objc_allocateProtocol!", proto->nameForLogging());
         return;
@@ -4678,8 +4720,9 @@ void objc_registerProtocol(Protocol *proto_gen)
 
     // NOT initProtocolIsa(). The protocol object may already 
     // have been retained and we must preserve that count.
-    proto->changeIsa(cls);
+    proto->changeIsa(cls); // 改变协议的 cls，不用 initProtocolIsa() 是为了不改变除 cls 外的其他信息
 
+    // 将协议插入 protocol_map 映射表中
     NXMapKeyCopyingInsert(protocols(), proto->mangledName, proto);
 }
 
@@ -4700,37 +4743,47 @@ protocol_addProtocol(Protocol *proto_gen, Protocol *addition_gen)
     protocol_t *proto = newprotocol(proto_gen);
     protocol_t *addition = newprotocol(addition_gen);
 
+    // 未完成的协议的 cls
     extern objc_class OBJC_CLASS_$___IncompleteProtocol;
     Class cls = (Class)&OBJC_CLASS_$___IncompleteProtocol;
 
     if (!proto_gen) return;
     if (!addition_gen) return;
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
+    // 如果 proto_gen 并不是未完成的协议
     if (proto->ISA() != cls) {
         _objc_inform("protocol_addProtocol: modified protocol '%s' is not "
                      "under construction!", proto->nameForLogging());
         return;
     }
+    
+    // 如果 addition_gen 并不是已注册的协议
     if (addition->ISA() == cls) {
         _objc_inform("protocol_addProtocol: added protocol '%s' is still "
                      "under construction!", addition->nameForLogging());
         return;        
     }
     
+    // 取得 proto_gen 的子协议列表
     protocol_list_t *protolist = proto->protocols;
-    if (!protolist) {
+    
+    if (!protolist) { // 如果 proto_gen 还没有子协议列表，就创建一个，大小只够一个元素
         protolist = (protocol_list_t *)
             calloc(1, sizeof(protocol_list_t) 
                              + sizeof(protolist->list[0]));
-    } else {
+    }
+    else { // 如果 proto_gen 已经存在子协议列表，就重新开辟一块内存，大小比原来能多放一个元素，并将原来列表中的数据拷贝过去
         protolist = (protocol_list_t *)
             realloc(protolist, protocol_list_size(protolist) 
                               + sizeof(protolist->list[0]));
     }
 
+    // 将 addition_gen 协议放在列表末尾
     protolist->list[protolist->count++] = (protocol_ref_t)addition;
+    
+    // proto_gen 的 protocols 指向新的子协议列表
     proto->protocols = protolist;
 }
 
@@ -4740,6 +4793,7 @@ protocol_addProtocol(Protocol *proto_gen, Protocol *addition_gen)
 * Adds a method to a protocol. The protocol must be under construction.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 
 static void
 protocol_addMethod_nolock(method_list_t*& list, SEL name, const char *types)
 {
@@ -7623,8 +7677,8 @@ object_copyFromZone(id oldObj, size_t extraBytes, void *zone)
 * Be warned that GC DOES NOT CALL THIS. If you edit this, also edit finalize.
 * CoreFoundation and other clients do call this under GC.
 **********************************************************************/
-
 // 销毁对象，但不释放内存，因为使用 GC 的情况下需要做一些其他的工作
+// 调用者：object_dispose()
 void *objc_destructInstance(id obj) 
 {
     if (obj) {
@@ -7658,6 +7712,7 @@ void *objc_destructInstance(id obj)
 * Locking: none
 **********************************************************************/
 // 这个方法为什么不写成 objc_object 的成员方法呢，难道是因为这里需要 free objc_object 对象的内存，在成员方法里释放自己的内存，可能是不大合适的吧
+// 调用者：objc_object::rootDealloc()
 id 
 object_dispose(id obj)
 {
@@ -7840,18 +7895,19 @@ OBJC_EXTERN void objc_msgSend_fp2ret_fixedup(void);
 * Repairs an old vtable dispatch call site. 
 * vtable dispatch itself is not supported.
 **********************************************************************/
-// 我靠我靠我靠，SEL_retain、SEL_release这些消息名是在这里和 objc_retain、objc_release 挂上勾的
-// 真心想不到，还以为是编译器干的呢
+// 修复一个老的 vtable 调度
+// 调用者：_read_images()
 static void 
 fixupMessageRef(message_ref_t *msg)
-{    
+{
+    // 注册消息的 sel
     msg->sel = sel_registerName((const char *)msg->sel);
 
-    if (ignoreSelector(msg->sel)) {
+    if (ignoreSelector(msg->sel)) { // 如果 sel 是需要被忽略的，就将其 imp 设为 _objc_ignored_method
         // ignored selector - bypass dispatcher
         msg->imp = (IMP)&_objc_ignored_method;
     }
-    else if (msg->imp == &objc_msgSend_fixup) { 
+    else if (msg->imp == &objc_msgSend_fixup) { // 如果消息的 imp 是 objc_msgSend_fixup，即指定了需要将 imp fixup
         if (msg->sel == SEL_alloc) {
             msg->imp = (IMP)&objc_alloc;
         } else if (msg->sel == SEL_allocWithZone) {
@@ -7863,7 +7919,7 @@ fixupMessageRef(message_ref_t *msg)
         } else if (msg->sel == SEL_autorelease) {
             msg->imp = (IMP)&objc_autorelease;
         } else {
-            msg->imp = &objc_msgSend_fixedup;
+            msg->imp = &objc_msgSend_fixedup; // 如果上面都不符合，就将它设置为已经 fixed-up 了
         }
     } 
     else if (msg->imp == &objc_msgSendSuper2_fixup) { 

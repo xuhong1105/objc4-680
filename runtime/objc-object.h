@@ -422,7 +422,7 @@ objc_object::retain()
     }
 
     // 有自定义 retain/release
-    // 猜的，最后会调用 objc_retain，见 fixupMessageRef
+    // 最后会调用 objc_retain
     return ((id(*)(objc_object *, SEL))objc_msgSend)(this, SEL_retain);
 }
 

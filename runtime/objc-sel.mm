@@ -108,6 +108,8 @@ void sel_init(bool wantsGC, size_t selrefCount)
 }
 
 
+// 创建一个 selector，如果设置需要 copy，就在堆中分配内存
+// 因为 selector 本质上就是 char * 字符串，所以直接强转就可以了
 static SEL sel_alloc(const char *name, bool copy)
 {
     selLock.assertWriting();
@@ -151,7 +153,7 @@ static SEL search_builtins(const char *name)
     return nil;
 }
 
-// 注册 SEL 的名字
+// 注册 SEL 的名字，能决定是否加锁和拷贝，拷贝即是否深拷贝 name，见 sel_alloc()
 // 调用者：sel_getUid() / sel_registerName() / sel_registerNameNoLock()
 static SEL __sel_registerName(const char *name, int lock, int copy) 
 {
@@ -194,7 +196,7 @@ static SEL __sel_registerName(const char *name, int lock, int copy)
     return result;
 }
 
-
+// 注册 SEL 的名字，加锁、深拷贝
 SEL sel_registerName(const char *name) {
     return __sel_registerName(name, 1, 1);     // YES lock, YES copy
 }

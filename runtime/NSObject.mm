@@ -2081,7 +2081,7 @@ _objc_rootAlloc(Class cls)
 }
 
 // Calls [cls alloc].
-// 见 fixupMessageRef，和 SEL_alloc 有关
+// 和 SEL_alloc 有关
 id
 objc_alloc(Class cls)
 {
@@ -2089,7 +2089,7 @@ objc_alloc(Class cls)
 }
 
 // Calls [cls allocWithZone:nil].
-// 见 fixupMessageRef，和 SEL_allocWithZone 有关
+// 和 SEL_allocWithZone 有关
 id 
 objc_allocWithZone(Class cls)
 {

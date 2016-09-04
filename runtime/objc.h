@@ -174,6 +174,7 @@ OBJC_EXPORT const char *sel_getName(SEL sel)
  *  method’s selector before you can add the method to a class definition. If the method name
  *  has already been registered, this function simply returns the selector.
  */
+// 在 runtime 中注册一个方法，映射 方法名 和 selector，并返回 seletor
 OBJC_EXPORT SEL sel_registerName(const char *str)
     __OSX_AVAILABLE_STARTING(__MAC_10_0, __IPHONE_2_0);
 

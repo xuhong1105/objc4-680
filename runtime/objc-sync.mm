@@ -30,10 +30,10 @@
 //
 
 
-typedef struct SyncData {
-    struct SyncData* nextData;
-    DisguisedPtr<objc_object> object;
-    int32_t threadCount;  // number of THREADS using this block
+typedef struct SyncData { // 同步数据结构体
+    struct SyncData* nextData; // 指向下一个 SyncData，看来是链表
+    DisguisedPtr<objc_object> object; // 锁住的对象
+    int32_t threadCount;  // 使用这个block(???)的线程数  number of THREADS using this block
     recursive_mutex_t mutex; // 递归锁
 } SyncData;
 
@@ -70,8 +70,12 @@ struct SyncList {
 #define LIST_FOR_OBJ(obj) sDataLists[obj].data
 static StripedMap<SyncList> sDataLists;
 
-
-enum usage { ACQUIRE/*获得*/, RELEASE, CHECK };
+// id2data() 中有用到，SyncData 的用途
+enum usage {
+    ACQUIRE, // 获得锁
+    RELEASE, // 释放锁
+    CHECK    // 检查锁
+};
 
 static SyncCache *fetch_cache(bool create)
 {
@@ -282,16 +286,20 @@ BREAKPOINT_FUNCTION(
 
 // Begin synchronizing on 'obj'. 
 // Allocates recursive mutex associated with 'obj' if needed.
-// Returns OBJC_SYNC_SUCCESS once lock is acquired.  
+// Returns OBJC_SYNC_SUCCESS once lock is acquired.
+// 开始锁住 obj 对象，
+// 如果需要的话，会给 obj 对象分配一个递归锁，即线程同步是用递归锁实现的，
+// 如果成功获得锁，会返回 OBJC_SYNC_SUCCESS
 int objc_sync_enter(id obj)
 {
-    int result = OBJC_SYNC_SUCCESS;
+    int result = OBJC_SYNC_SUCCESS; // 用来记录结果，默认成功
 
-    if (obj) {
-        SyncData* data = id2data(obj, ACQUIRE);
+    if (obj) { // obj 必须非空，
+        SyncData* data = id2data(obj, ACQUIRE); // 为 obj 对象绑定一个递归锁
         assert(data);
-        data->mutex.lock();
-    } else {
+        data->mutex.lock(); // 递归锁加锁
+    }
+    else { // 否则 @synchronized 啥也不干
         // @synchronized(nil) does nothing
         if (DebugNilSync) {
             _objc_inform("NIL SYNC DEBUG: @synchronized(nil); set a breakpoint on objc_sync_nil to debug");
@@ -305,18 +313,20 @@ int objc_sync_enter(id obj)
 
 // End synchronizing on 'obj'. 
 // Returns OBJC_SYNC_SUCCESS or OBJC_SYNC_NOT_OWNING_THREAD_ERROR
+// 结束对 obj 的锁
+// 锁释放成功，返回 OBJC_SYNC_SUCCESS，否则返回 OBJC_SYNC_NOT_OWNING_THREAD_ERROR
 int objc_sync_exit(id obj)
 {
     int result = OBJC_SYNC_SUCCESS;
     
     if (obj) {
-        SyncData* data = id2data(obj, RELEASE); 
+        SyncData* data = id2data(obj, RELEASE); // 为 obj 解绑递归锁
         if (!data) {
-            result = OBJC_SYNC_NOT_OWNING_THREAD_ERROR;
+            result = OBJC_SYNC_NOT_OWNING_THREAD_ERROR; // 压根儿没有 objc_sync_enter 过
         } else {
-            bool okay = data->mutex.tryUnlock();
+            bool okay = data->mutex.tryUnlock(); // 尝试解锁
             if (!okay) {
-                result = OBJC_SYNC_NOT_OWNING_THREAD_ERROR;
+                result = OBJC_SYNC_NOT_OWNING_THREAD_ERROR; // 解锁失败
             }
         }
     } else {

@@ -47,14 +47,20 @@ int main(int argc, const char * argv[]) {
             objc_sync_enter(_sync_obj);  // <<=== 看这里
             try {
                 struct _SYNC_EXIT {
-                    _SYNC_EXIT(id arg) : sync_exit(arg) {}
-                    ~_SYNC_EXIT() {
+                    _SYNC_EXIT(id arg) : sync_exit(arg) {} // 构造函数
+                    ~_SYNC_EXIT() { // 析构函数，析构的时候会自动释放锁
                         objc_sync_exit(sync_exit); // <<=== 看这里
                     }
-                    id sync_exit;
+                    id sync_exit; // 成员变量
                 }
-                _sync_exit(_sync_obj);
+                _sync_exit(_sync_obj);  // 不要被这句骗了，不然你会百思不得其解，
+                                        // 这不是一个单独的语句，注意看结构体的右大括号后面并没有分号，
+                                        // 所以 _sync_exit(_sync_obj) 是跟在 _SYNC_EXIT 结构体后面的
+                                        // 即它声明了一个名为 _sync_exit 的结构体对象
                 NSLog((NSString *)&__NSConstantStringImpl__var_folders_cp_sc2q63f937j88dcxp23f471w0000gn_T_main_3c34e3_mi_0);
+ 
+                // 代码块结束后，_sync_exit 对象会被析构，在其析构函数中调用了 objc_sync_exit，来释放锁
+ 
             } catch (id e) {
                 _rethrow = e;
             }
