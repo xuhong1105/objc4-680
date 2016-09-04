@@ -1005,7 +1005,9 @@ inform_duplicate(const char *name, Class oldCls, Class cls)
 #endif
 }
 
-
+// 取得属性的特性列表对应的特性字符串，attrs 是特性列表
+// count 是 attrs 中元素的数量
+// 返回的字符串是在堆中分配的
 const char *
 copyPropertyAttributeString(const objc_property_attribute_t *attrs,
                             unsigned int count)
@@ -1034,7 +1036,8 @@ copyPropertyAttributeString(const objc_property_attribute_t *attrs,
         }
     }
 
-    result = (char *)malloc(len + 1);
+    result = (char *)malloc(len + 1); // 堆中分配
+    
     char *s = result;
     for (i = 0; i < count; i++) {
         if (attrs[i].value) {

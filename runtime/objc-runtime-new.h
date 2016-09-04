@@ -318,7 +318,7 @@ struct entsize_list_tt {
 // 方法结构体
 struct method_t {
     SEL name;          // 方法名，就是 SEL
-    const char *types; // 方法类型
+    const char *types; // 方法类型，有的地方又称 method signature 方法签名
     IMP imp;           // 指向方法的函数实现的指针
     
     /* 
@@ -371,8 +371,9 @@ struct ivar_t {
 
 // 属性结构体
 struct property_t {
-    const char *name;  // 属性名，
-    const char *attributes; // 属性有哪些特性
+    const char *name;  // 属性名，堆中分配
+    const char *attributes; // 属性的特性字符串，标识了属性有哪些特性
+                            // 该字符串是在堆中分配的
 };
 
 #pragma mark - method_list_t

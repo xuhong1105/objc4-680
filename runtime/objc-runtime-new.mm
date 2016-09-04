@@ -723,7 +723,7 @@ prepareMethodLists(Class cls, method_list_t **addedLists, int addedCount,
 // 假定 cats 中的分类都已经被加载，并且按照加载的顺序排好序了，老的分类排前面，新的排后面
 // cats : 分类列表，每个元素都是一个分类；
 // flush_caches : 是否清空 cls 类的方法缓存，如果是 YES，会调用 flushCaches() 函数清空缓存
-// 该函数被 methodizeClass() 和 remethodizeClass() 函数调用
+// 调用者：methodizeClass() / remethodizeClass()
 static void 
 attachCategories(Class cls, category_list *cats, bool flush_caches)
 {
@@ -807,7 +807,7 @@ attachCategories(Class cls, category_list *cats, bool flush_caches)
 //    将 cls 类的所有没有被 attach 的分类 attach 到 cls 上
 // 2. 即将分类中的方法、属性、协议添加到 methods、 properties 和 protocols 中
 //    runtimeLock 读写锁必须被调用者上写锁，保证线程安全
-// 本函数只被 realizeClass() 函数调用
+// 调用者：realizeClass()
 // methodize 美 ['meθədaiz] vt. 使…有条理；为…定顺序
 static void methodizeClass(Class cls)
 {
@@ -857,7 +857,9 @@ static void methodizeClass(Class cls)
     // 给 cls 类附加分类，unattachedCategoriesForClass 会返回 cls 类的没有被附加的类
     category_list *cats = unattachedCategoriesForClass(cls, true /*realizing 其实这个参数压根没用*/);
     // 从分类列表中添加方法列表、属性和协议到 cls 类中
-    // #疑问：attachCategories 要求分类列表中是排好序的，老的分类排前面，新的排后面，那么排序是在哪里做的呢？？？？
+    // attachCategories 要求分类列表中是排好序的，老的分类排前面，新的排后面，那么排序是在哪里做的呢？？？？
+    // 自问自答：见 addUnattachedCategoryForClass() 函数，新的 unattached 的分类本来就是插入到列表末尾的
+    //         所以压根儿不用再另外排序
     attachCategories(cls, cats, false /*不清空缓存 因为这时候压根连缓存都没有 don't flush caches*/);
 
     if (PrintConnecting) {
@@ -3239,7 +3241,7 @@ void _read_images(header_info **hList, uint32_t hCount)
 
     ts.log("IMAGE TIMES: remap classes");
 
-    // Fix up @selector references
+    // Fix up @selector references fixup @selector 引用
     static size_t UnfixedSelectors; // 记录 hList 中所有镜像中一共有多少 unfixed 的 selector
     sel_lock(); // selLock 上写锁
     for (EACH_HEADER) { // 遍历 hList
@@ -3277,7 +3279,7 @@ void _read_images(header_info **hList, uint32_t hCount)
     ts.log("IMAGE TIMES: fix up objc_msgSend_fixup");
 #endif
 
-    // Discover protocols. Fix up protocol refs.
+    // Discover protocols. Fix up protocol refs. 取得镜像中的协议，读出协议
     for (EACH_HEADER) {
         extern objc_class OBJC_CLASS_$_Protocol;
         Class cls = (Class)&OBJC_CLASS_$_Protocol;
@@ -4565,6 +4567,7 @@ copyPropertyList(property_list_t *plist, unsigned int *outCount)
 
     if (count > 0) {
         // 为数组在堆中分配足够大的内存，分配 count+1 个单位，是为了在最后一个单位上存 nil
+        // 该数组是以 nil 结尾的
         result = (property_t **)malloc((count+1) * sizeof(property_t *));
 
         // 遍历属性列表
@@ -4793,44 +4796,66 @@ protocol_addProtocol(Protocol *proto_gen, Protocol *addition_gen)
 * Adds a method to a protocol. The protocol must be under construction.
 * Locking: acquires runtimeLock
 **********************************************************************/
-// 
+// 向协议中添加方法，该协议必须是正在构造中(under construction)，未注册的
+// 需要指定是哪个方法列表
+// 这个是无锁版本
+// 调用者：protocol_addMethodDescription()
 static void
-protocol_addMethod_nolock(method_list_t*& list, SEL name, const char *types)
+protocol_addMethod_nolock(method_list_t*& list, // 方法列表的引用，因为是引用，所以下面可以直接赋值，免去了二级指针的麻烦
+                          SEL name,
+                          const char *types) // 方法类型字符串，又称方法签名
 {
-    if (!list) {
+    if (!list) { // 如果方法列表为 nil
+        // 为其在堆中分配一块内存
         list = (method_list_t *)calloc(sizeof(method_list_t), 1);
-        list->entsizeAndFlags = sizeof(list->first);
-        list->setFixedUp();
-    } else {
+        list->entsizeAndFlags = sizeof(list->first); // 列表中元素的大小是第一个元素的大小
+        list->setFixedUp(); // 设置该方法列表是已经 fixed-up 的
+    }
+    else { // 否则为 list 重新分配一块更大的内存，以存放新来的方法
+        // 新的 size 比原来多 list->entsize()，即多一个元素的大小
         size_t size = list->byteSize() + list->entsize();
+        // 用 realloc 重新分配内存，并将原来的数据拷贝过去
         list = (method_list_t *)realloc(list, size);
     }
 
+    // 取得新的方法列表中，最后一个位置的方法
     method_t& meth = list->get(list->count++);
-    meth.name = name;
-    meth.types = strdup(types ? types : "");
-    meth.imp = nil;
+    meth.name = name; // 名字，即 selector
+    meth.types = strdup(types ? types : ""); // 方法类型字符串，需要在堆中深拷贝
+    meth.imp = nil; // 因为是协议，所以 imp 为 nil
 }
 
+
+// 向 proto_gen 协议中添加方法，该协议必须是正在构造中(under construction)，未注册的
+// 这是有锁的版本
 void 
-protocol_addMethodDescription(Protocol *proto_gen, SEL name, const char *types,
-                              BOOL isRequiredMethod, BOOL isInstanceMethod) 
+protocol_addMethodDescription(Protocol *proto_gen,
+                              SEL name,
+                              const char *types, // 方法类型字符串，又称方法签名
+                              BOOL isRequiredMethod, // 是否是 required 方法，与 optional 相对
+                              BOOL isInstanceMethod) // 是否是实例方法，与类方法相对
 {
     protocol_t *proto = newprotocol(proto_gen);
 
+    // proto_gen 必须是正在构造中(under construction)，未注册的协议
+    
+    // 未完成的协议的 cls 是 OBJC_CLASS_$___IncompleteProtocol
     extern objc_class OBJC_CLASS_$___IncompleteProtocol;
     Class cls = (Class)&OBJC_CLASS_$___IncompleteProtocol;
 
-    if (!proto_gen) return;
+    if (!proto_gen) return; // proto_gen 为 nil，没得玩，直接返回
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
-    if (proto->ISA() != cls) {
+    if (proto->ISA() != cls) { // proto_gen 的 cls 不是 OBJC_CLASS_$___IncompleteProtocol
+                               // 即它不是未完成的协议，警告，并直接返回
         _objc_inform("protocol_addMethodDescription: protocol '%s' is not "
                      "under construction!", proto->nameForLogging());
         return;
     }
 
+    // 根据 isRequiredMethod 和 isInstanceMethod 确定需要将方法插入到哪个方法列表中
+    // 然后调用 protocol_addMethod_nolock() 插入新方法
     if (isRequiredMethod  &&  isInstanceMethod) {
         protocol_addMethod_nolock(proto->instanceMethods, name, types);
     } else if (isRequiredMethod  &&  !isInstanceMethod) {
@@ -4848,48 +4873,65 @@ protocol_addMethodDescription(Protocol *proto_gen, SEL name, const char *types,
 * Adds a property to a protocol. The protocol must be under construction.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 向协议中添加一个属性，该协议必须是 under construction 未完成状态
+// 这是无锁版本
+// 调用者：protocol_addProperty()
 static void 
-protocol_addProperty_nolock(property_list_t *&plist, const char *name, 
-                            const objc_property_attribute_t *attrs, 
-                            unsigned int count)
+protocol_addProperty_nolock(property_list_t *&plist, // 协议中的属性列表，注意是引用
+                            const char *name, // 新属性的名字
+                            const objc_property_attribute_t *attrs, // 新属性的特性列表
+                            unsigned int count) // 特性列表中元素的数量
 {
-    if (!plist) {
+    if (!plist) { // 如果属性列表为 nil
+        // 就在堆中新开辟一个，并清零
         plist = (property_list_t *)calloc(sizeof(property_list_t), 1);
-        plist->entsizeAndFlags = sizeof(property_t);
+        plist->entsizeAndFlags = sizeof(property_t); // 设置元素的大小
     } else {
         plist = (property_list_t *)
             realloc(plist, sizeof(property_list_t) 
                     + plist->count * plist->entsize());
     }
 
-    property_t& prop = plist->get(plist->count++);
-    prop.name = strdup(name);
+    property_t& prop = plist->get(plist->count++); // property_list_t 是值类型的，所以直接可以取得最后一个元素
+    prop.name = strdup(name); // 深拷贝 name
+    // 取得 attrs 对应的特性字符串，并赋给 prop.attributes，该字符串是在堆中分配的
     prop.attributes = copyPropertyAttributeString(attrs, count);
 }
 
+
+// 向协议中添加一个属性，该协议必须是 under construction 未完成状态
+// 这是有锁版本
 void 
-protocol_addProperty(Protocol *proto_gen, const char *name, 
-                     const objc_property_attribute_t *attrs, 
-                     unsigned int count,
-                     BOOL isRequiredProperty, BOOL isInstanceProperty)
+protocol_addProperty(Protocol *proto_gen,
+                     const char *name, // 新属性的名字
+                     const objc_property_attribute_t *attrs, // 新属性的特性列表
+                     unsigned int count, // 特性列表中元素的数量
+                     BOOL isRequiredProperty, // 是否是 required 属性，但现在不支持 optional 属性，所以一定是 YES
+                     BOOL isInstanceProperty) // 是否是 实例属性，但现在不支持 类属性，所以一定是 YES
 {
     protocol_t *proto = newprotocol(proto_gen);
 
+    // 未完成的协议的 cls 是 OBJC_CLASS_$___IncompleteProtocol
     extern objc_class OBJC_CLASS_$___IncompleteProtocol;
     Class cls = (Class)&OBJC_CLASS_$___IncompleteProtocol;
 
+    // 协议和属性名都不能为 nil
     if (!proto) return;
     if (!name) return;
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
+    // 如果 proto 的 cls 不是 OBJC_CLASS_$___IncompleteProtocol，
+    // 即它不是 under construction 未完成的协议，就警告，并返回
     if (proto->ISA() != cls) {
         _objc_inform("protocol_addProperty: protocol '%s' is not "
                      "under construction!", proto->nameForLogging());
         return;
     }
 
+    // 当前只支持 required 的实例属性
     if (isRequiredProperty  &&  isInstanceProperty) {
+        // 调用 protocol_addProperty_nolock() 函数将新属性添加到 协议的 实例属性列表中
         protocol_addProperty_nolock(proto->instanceProperties, name, attrs, count);
     }
     //else if (isRequiredProperty  &&  !isInstanceProperty) {
@@ -4905,28 +4947,39 @@ protocol_addProperty(Protocol *proto_gen, const char *name,
 /***********************************************************************
 * objc_getClassList
 * Returns pointers to all classes.
-* This requires all classes be realized, which is regretfully non-lazy.
+* This requires all classes be realized, which is regretfully non-lazy. 很抱歉是非惰性的
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 取得 runtime 中所有已注册的类，
+// 这个函数会将 runtime 中所有类都 realize 了，因为这是非惰性的，所以会比较慢，
+// buffer: 是一个已经分配好内存的数组，用来存储所有已注册的类的指针，
+// bufferLen: 分配给 buffer 的内存长度，即 buffer 中最多可以存多少个类的指针，
+// 返回值是 runtime 中所有已注册的类的总数，
+// 如果 bufferLen 小于总数，则得到的是一个子集
 int 
 objc_getClassList(Class *buffer, int bufferLen) 
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁，因为需要 realize 所有类
 
-    realizeAllClasses();
+    realizeAllClasses(); // 将 runtime 中所有类都 realize 了，因为这是非惰性的，所以会比较慢
 
     int count;
     Class cls;
     NXHashState state;
-    NXHashTable *classes = realizedClasses();
-    int allCount = NXCountHashTable(classes);
+    
+    NXHashTable *classes = realizedClasses(); // 获得 realized_class_hash 哈希表，里面存了所有已被 realized 的类
+    
+    int allCount = NXCountHashTable(classes); // realized_class_hash 哈希表中类的总数
 
-    if (!buffer) {
+    if (!buffer) { // 如果 buffer 压根没分配空间，没地方存结果，就直接返回总数
         return allCount;
     }
 
     count = 0;
     state = NXInitHashState(classes);
+    
+    // 遍历 realized_class_hash 哈希表中的所有类，将类的地址逐一放入 buffer 中
+    // 插入的数量必须小于分配给 buffer 的空间长度
     while (count < bufferLen  &&  
            NXNextHashState(classes, &state, (void **)&cls))
     {
@@ -4947,6 +5000,7 @@ objc_getClassList(Class *buffer, int bufferLen)
 * freed with free().
 * Locking: write-locks runtimeLock
 **********************************************************************/
+//
 Class *
 objc_copyClassList(unsigned int *outCount)
 {

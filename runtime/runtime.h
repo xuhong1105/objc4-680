@@ -316,7 +316,7 @@ OBJC_EXPORT Class objc_getRequiredClass(const char *name)
     __OSX_AVAILABLE_STARTING(__MAC_10_0, __IPHONE_2_0);
 
 /** 
- * Obtains the list of registered class definitions.
+ * Obtains the list of registered class definitions（定义）.
  * 
  * @param buffer An array of \c Class values. On output, each \c Class value points to
  *  one class definition, up to either \e bufferCount or the total number of registered classes,
