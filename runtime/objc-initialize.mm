@@ -419,6 +419,7 @@ static NXMapTable *pendingInitializeMap; // 一个 MapTable key：class；value�
  就将 cls 类标记为 initialized，然后标记 cls 类的所有子类都已经完成 +initialize，
  （ 标记操作是递归进行的，子类记录在 PendingInitialize 中 ）
  进入这个函数前，需要 classInitLock 被加锁（_class_initialize 中加了锁）
+ 调用者：_class_initialize()
 **********************************************************************/
 static void _finishInitializing(Class cls, Class supercls)
 {

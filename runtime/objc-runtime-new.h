@@ -614,7 +614,8 @@ struct locstamped_category_list_t {
 
 
 // class has instance-specific GC layout
-#define RW_HAS_INSTANCE_SPECIFIC_LAYOUT (1 << 21)  // 完全不明白
+#define RW_HAS_INSTANCE_SPECIFIC_LAYOUT (1 << 21)  // 指定了 Instance-specific object layout，
+                                                   // 见 _class_setIvarLayoutAccessor
 // available for use
 // #define RW_20       (1<<20)
 // class has started realizing but not yet completed it
@@ -948,7 +949,8 @@ struct class_ro_t {
     uint32_t reserved;  // 64 位系统下，才有这个字段。 保留字段... 不用深究
 #endif
 
-    const uint8_t * ivarLayout; // 记录了哪些是 strong 的 ivar
+    const uint8_t * ivarLayout; // 记录了哪些是 strong 的 ivar，
+                                // 也有可能是 
     
     const char * name;   // 从上面的实例看，应该是类本身的名字
     

@@ -60,8 +60,14 @@ static void flushCaches(Class cls);
 static void fixupMessageRef(message_ref_t *msg);
 #endif
 
-static bool MetaclassNSObjectAWZSwizzled; // 记录 NSObject 元类的 AWZ 方法是否被替换了（Swizzled）
-static bool ClassNSObjectRRSwizzled;
+static bool MetaclassNSObjectAWZSwizzled; // 记录 NSObject 元类中的 AWZ 方法是否被 swizzled 了
+                                          // AWZ 方法是类方法，所以在元类中
+                                          // Method Swizzling 方法混合/方法调配
+                                          // 在 updateCustomRR_AWZ() 中记录，在 objc_class::setInitialized() 中使用
+
+static bool ClassNSObjectRRSwizzled; // 记录 NSObject 类中的 RR 方法是否被 swizzled 了
+                                     // RR 方法是实例方法，所以在实例类中
+                                     // 在 updateCustomRR_AWZ() 中记录，在 objc_class::setInitialized() 中使用
 
 #define SDK_FORMAT "%hu.%hhu.%hhu"
 #define FORMAT_SDK(v) \
@@ -539,6 +545,8 @@ static void removeAllUnattachedCategoriesForClass(Class cls)
 static Class classNSObject(void)
 {
     // NSObject 类本质上也是个 objc_class 对象，而且有且只有一个，名字就叫 OBJC_CLASS_$_NSObject
+    // 它可能是编译器定的，不知道与 NSObject.h 中的 NSObject 有什么联系
+    // 我猜 NSObject.h 应该是能被编译成类的，而不是摆着看看的吧
     extern objc_class OBJC_CLASS_$_NSObject;
     return (Class)&OBJC_CLASS_$_NSObject;
 }
@@ -1977,6 +1985,7 @@ static protocol_t *remapProtocol(protocol_ref_t proto)
     // 用 proto 协议 重整后的名字 查找对应的新协议
     protocol_t *newproto = (protocol_t *)
         getProtocol(((protocol_t *)proto)->mangledName);
+    
     return newproto ? newproto : (protocol_t *)proto; // 如果存在新协议，就返回，否则依然返回 proto
 }
 
@@ -4350,7 +4359,8 @@ protocol_getMethodDescription(Protocol *p, SEL aSel,
 * Locking: runtimeLock must be held by the caller.
 **********************************************************************/
 // self 协议是否 conforms to(符合，遵从？) other 协议，
-// 按下面代码的意思，就是 self 协议本身以及它的子协议中是否有一个协议与 other 协议的 mangledName 相同
+// 按下面代码的意思，就是 self 协议本身以及它的子协议中是否有一个协议与 other 协议的 mangledName 相同，
+// 即 other 协议是 self 协议的子集，
 // 这是一个递归函数，
 // 还是个无锁版本
 // 调用者：class_conformsToProtocol() / protocol_conformsToProtocol()
@@ -5450,6 +5460,9 @@ _objc_copyClassNamesForImage(header_info *hi, unsigned int *outCount)
  * _class_getInstanceStart
  * Uses alignedInstanceStart() to ensure that ARR layout strings are
  * interpreted relative to the first word aligned ivar of an object.
+ 
+ #疑问：不明白这是什么意思
+ 
  * Locking: none
  **********************************************************************/
 // 获取类中的实例变量的起始地址
@@ -6234,7 +6247,10 @@ objc_property_t class_getProperty(Class cls, const char *name)
 /***********************************************************************
 * Locking: fixme
 **********************************************************************/
-
+// 用于 gdb 调试，
+// 根据 cls 的重整后的名称，查找类，
+// 在 look_up_class() 中，如果该类没有 realized 就将其 realize 了，
+// 调用者：gdb_object_getClass()
 Class gdb_class_getClass(Class cls)
 {
     const char *className = cls->mangledName();
@@ -6243,6 +6259,8 @@ Class gdb_class_getClass(Class cls)
     return rCls;
 }
 
+// 用于 gdb 调试，
+// 取得 obj 对象的类
 Class gdb_object_getClass(id obj)
 {
     if (!obj) return nil;
@@ -6253,7 +6271,10 @@ Class gdb_object_getClass(id obj)
 /***********************************************************************
 * Locking: write-locks runtimeLock
 **********************************************************************/
-// 将 cls 设置为已经被 Initialized，里面会做设置是否有自定义 AWZ/RR 的工作，并将 cls 的状态由 Initializing 变为 Initialized
+// 将 cls 设置为已经被 Initialized，
+// 里面会做设置是否有自定义 AWZ/RR 的工作，
+// 并将 cls 的状态由 Initializing 变为 Initialized
+// 调用者：_finishInitializing()
 void 
 objc_class::setInitialized()
 {
@@ -6297,15 +6318,16 @@ objc_class::setInitialized()
         metaCustomAWZ = YES; // GC 一直有自定义的 AWZ
         inherited = NO;
     }
-    else if (MetaclassNSObjectAWZSwizzled) { // NSObject 元类的 AWZ 方法被替换了，runtime 的方法交换
+    else if (MetaclassNSObjectAWZSwizzled) { // NSObject 元类中的 AWZ 方法被 swizzle 了
         // Somebody already swizzled NSObject's methods
-        metaCustomAWZ = YES;
+        // 其他地方已经 swizzle 了 NSObject 的 AWZ 方法，见 objc_class::setHasCustomAWZ()
+        metaCustomAWZ = YES; // 记录有自定义 AWZ
         inherited = NO;
     }
-    // 如果元类是 NSObject 类的元类
+    // 如果 metacls 是 NSObject 类的元类
     else if (metacls == classNSObject()->ISA()) {
         // NSObject's metaclass AWZ is default, but we still need to check categories
-        // NSObject 的元类的 AWZ 是默认的，因为 NSObject 元类类是根类，默认的 AWZ 指的就是 NSObject 元类中的 AWZ
+        // NSObject 的元类中的 AWZ 是默认的，因为 NSObject 元类类是根类，默认的 AWZ 指的就是 NSObject 元类中的 AWZ
         // 但是我们还需要检查分类，万一分类重写了 AWZ
         // 取得元类中存的分类方法列表
         auto& methods = metacls->data()->methods;
@@ -6355,15 +6377,16 @@ objc_class::setInitialized()
 
     // ------- 查找是否有自定的 RR  retain/release
     
-    bool clsCustomRR = NO;
+    bool clsCustomRR = NO; // 标记是否是自定义 RR
     if (UseGC) { // GC 一直有自定义的 RR
         // GC is always custom RR
         clsCustomRR = YES;
         inherited = NO;
     }
-    else if (ClassNSObjectRRSwizzled) { // NSObject 的 RR 被替换了，runtime 的方法交换
+    else if (ClassNSObjectRRSwizzled) { // NSObject 的 RR 被 swizzle 了
         // Somebody already swizzled NSObject's methods
-        clsCustomRR = YES;
+        // 一些地方已经 swizzle 了 NSObject 的 RR 方法，见 objc_class::setHasCustomRR()
+        clsCustomRR = YES; // 标记 cls 类用自定义 RR
         inherited = NO;
     }
     if (cls == classNSObject()) { // 如果 cls 是 NSObject 类
@@ -6426,8 +6449,13 @@ objc_class::setInitialized()
  * _class_usesAutomaticRetainRelease
  * Returns YES if class was compiled with -fobjc-arc
  **********************************************************************/
+// 判断 cls 类是否用了自动引用计数 ARC，
+// ARC - Automatic Reference Counting 和 ARR - Automatic Retain Release 应该是一回事儿
+// 调用者：arr_fixup_copied_references() / classOrSuperClassesUseARR() /
+//           object_getIvar() / object_setIvar()
 BOOL _class_usesAutomaticRetainRelease(Class cls)
 {
+    // 是否使用了 ARC 被记录在 ro 的 flags 中
     return bool(cls->data()->ro->flags & RO_IS_ARR);
 }
 
@@ -6435,6 +6463,8 @@ BOOL _class_usesAutomaticRetainRelease(Class cls)
 /***********************************************************************
 * Return YES if sel is used by retain/release implementors
 **********************************************************************/
+// 判断 sel 是否 RR 的 selector
+// 调用者：updateCustomRR_AWZ()
 static bool 
 isRRSelector(SEL sel)
 {
@@ -6449,7 +6479,7 @@ isRRSelector(SEL sel)
 * Return YES if mlist implements one of the isRRSelector() methods
 **********************************************************************/
 // 查找 mlist 中是否有方法重写了 RR, 即是否有方法的名字是 RR
-// 被 objc_class::setInitialized() 方法和 prepareMethodLists() 函数调用
+// 调用者：objc_class::setInitialized() / prepareMethodLists()
 static bool 
 methodListImplementsRR(const method_list_t *mlist)
 {
@@ -6467,6 +6497,8 @@ methodListImplementsRR(const method_list_t *mlist)
 /***********************************************************************
 * Return YES if sel is used by alloc or allocWithZone implementors
 **********************************************************************/
+// 判断 sel 是否是 AWZ 的 selector
+// 调用者：updateCustomRR_AWZ()
 static bool 
 isAWZSelector(SEL sel)
 {
@@ -6486,7 +6518,7 @@ methodListImplementsAWZ(const method_list_t *mlist)
             search_method_list(mlist, SEL_alloc));
 }
 
-
+// 打印自定义 RR
 void 
 objc_class::printCustomRR(bool inherited)
 {
@@ -6497,6 +6529,7 @@ objc_class::printCustomRR(bool inherited)
                  inherited ? " (inherited)" : "");
 }
 
+// 打印自定义 AWZ
 void 
 objc_class::printCustomAWZ(bool inherited)
 {
@@ -6507,6 +6540,7 @@ objc_class::printCustomAWZ(bool inherited)
                  inherited ? " (inherited)" : "");
 }
 
+// 打印需要 raw isa
 void 
 objc_class::printRequiresRawIsa(bool inherited)
 {
@@ -6523,27 +6557,30 @@ objc_class::printRequiresRawIsa(bool inherited)
 * inheritors of custom RR (retain/release/autorelease/retainCount)
 **********************************************************************/
 // 设置本类以及其所有的子类有自定义的 RR，参数 inherited 好像没啥用
+// 这是一个递归函数
+// 调用者：addSubclass() / prepareMethodLists() / updateCustomRR_AWZ()
 void objc_class::setHasCustomRR(bool inherited) 
 {
     Class cls = (Class)this;
-    runtimeLock.assertWriting();
+    
+    runtimeLock.assertWriting(); // runtimeLock 需要事先加写锁
 
-    // 如果已经有自定义的 RR ，就直接返回
-    if (hasCustomRR()) return;
+    if (hasCustomRR()) return; // 如果已经设置过了，就直接返回
     
     // 遍历它和它的子类
     foreach_realized_class_and_subclass(cls, ^(Class c){
-        if (c != cls  &&  !c->isInitialized()) {
+        
+        if (c != cls  &&  !c->isInitialized()) { // 如果 c 类还没有被 Initialized
             // Subclass not yet initialized. Wait for setInitialized() to do it
             // fixme short circuit recursion?
             return;
         }
-        if (c->hasCustomRR()) {
+        if (c->hasCustomRR()) { // 如果已经有自定义的 RR
             // fixme short circuit recursion?
             return;
         }
 
-        c->bits.setHasCustomRR();
+        c->bits.setHasCustomRR(); // 设置 c 类有自定义的 RR
 
         if (PrintCustomRR) {
             // inherited 好像只在这里用了，感觉。。。。没啥用啊
@@ -6556,13 +6593,18 @@ void objc_class::setHasCustomRR(bool inherited)
 * Mark this class and all of its subclasses as implementors or 
 * inheritors of custom alloc/allocWithZone:
 **********************************************************************/
+// 设置本类和其所有的子类有自定义的 AWZ
+// 这是一个递归函数
+// 调用者：addSubclass() / prepareMethodLists() / updateCustomRR_AWZ()
 void objc_class::setHasCustomAWZ(bool inherited) 
 {
     Class cls = (Class)this;
-    runtimeLock.assertWriting();
-
-    if (hasCustomAWZ()) return;
     
+    runtimeLock.assertWriting(); // runtimeLock 需要事先加写锁
+
+    if (hasCustomAWZ()) return; // 如果已经设置了，就直接返回
+    
+    // 遍历本类，及其所有子孙类
     foreach_realized_class_and_subclass(cls, ^(Class c){
         if (c != cls  &&  !c->isInitialized()) {
             // Subclass not yet initialized. Wait for setInitialized() to do it
@@ -6574,7 +6616,7 @@ void objc_class::setHasCustomAWZ(bool inherited)
             return;
         }
 
-        c->bits.setHasCustomAWZ();
+        c->bits.setHasCustomAWZ(); // 设置为有自定义 AWZ
 
         if (PrintCustomAWZ) c->printCustomAWZ(inherited  ||  c != cls);
     });
@@ -6615,7 +6657,8 @@ void objc_class::setRequiresRawIsa(bool inherited)
 /***********************************************************************
 * Update custom RR and AWZ when a method changes its IMP
 **********************************************************************/
-// 看 meth 方法是否是自定义 RR or AWZ，如果是的话，会做一些处理
+// 看 cls 中的 meth 方法是否是自定义 RR or AWZ，如果是的话，会做一些处理
+// 调用者：_method_setImplementation() / method_exchangeImplementations()
 static void
 updateCustomRR_AWZ(Class cls, method_t *meth)
 {
@@ -6627,74 +6670,87 @@ updateCustomRR_AWZ(Class cls, method_t *meth)
     // if the swizzled method is one of the methods that is assumed to be 
     // non-custom. These special cases are listed in setInitialized().
     // We look for such cases here.
-
-    if (isRRSelector(meth->name)) {
+    
+    if (isRRSelector(meth->name)) { // 如果 meth 属于 RR 方法
         
-        if ((classNSObject()->isInitialized() && 
-             classNSObject()->hasCustomRR())  
-            ||  
-            ClassNSObjectRRSwizzled) 
+        if ((classNSObject()->isInitialized() // NSObject 类已经被 Initialized
+             && classNSObject()->hasCustomRR()) // 且 NSObject 类有自定义 RR
+            || ClassNSObjectRRSwizzled) // 或者 NSObject 类的 RR 方法已经被 swizzled 了
         {
             // already custom, nothing would change
+            // 则已经是自定义的，不需要做什么修改
             return;
         }
 
-        bool swizzlingNSObject = NO;
-        if (cls == classNSObject()) {
-            swizzlingNSObject = YES;
+        bool swizzlingNSObject = NO; // 标记是否 swizzle NSObject 类
+        
+        if (cls == classNSObject()) { // 如果 cls 类是 NSObject 类
+            swizzlingNSObject = YES; // 就标记为需要 swizzle NSObject 类
         } else {
             // Don't know the class. 
             // The only special case is class NSObject.
+            // 不清楚 cls 类，唯一的特例就是 NSObject 类
+            // 遍历 NSObject 类的方法列表
             for (const auto& meth2 : classNSObject()->data()->methods) {
-                if (meth == &meth2) {
-                    swizzlingNSObject = YES;
+                if (meth == &meth2) { // 当有方法与 meth 地址相同
+                    swizzlingNSObject = YES; // 就标记为需要 swizzle NSObject 类
                     break;
                 }
             }
         }
-        if (swizzlingNSObject) {
-            if (classNSObject()->isInitialized()) {
-                classNSObject()->setHasCustomRR();
+        if (swizzlingNSObject) { // 如果需要 swizzle NSObject 类
+            if (classNSObject()->isInitialized()) { // 如果 NSObject 类已经被 Initialized 了
+                classNSObject()->setHasCustomRR(); // 就设置为有自定义 RR
             } else {
                 // NSObject not yet +initialized, so custom RR has not yet 
                 // been checked, and setInitialized() will not notice the 
-                // swizzle. 
+                // swizzle.
+                // NSObject 还没有被 Initialized，就先标记一下，
+                // 当 NSObject 被 initialize 以后，走到 setInitialized() 函数，里面会接着做处理
                 ClassNSObjectRRSwizzled = YES;
             }
         }
     }
-    else if (isAWZSelector(meth->name)) {
-        Class metaclassNSObject = classNSObject()->ISA();
-
-        if ((metaclassNSObject->isInitialized() && 
-             metaclassNSObject->hasCustomAWZ())  
-            ||  
-            MetaclassNSObjectAWZSwizzled) 
+    
+    else if (isAWZSelector(meth->name)) { // 如果 meth 属于 AWZ 方法
+        
+        Class metaclassNSObject = classNSObject()->ISA(); // 取得 NSObject 的元类
+        
+        if ((metaclassNSObject->isInitialized()  // NSObject 类已经被 Initialized（该信息存在元类中）
+            && metaclassNSObject->hasCustomAWZ()) // 且 NSObject 元类中有自定义 AWZ 方法
+            || MetaclassNSObjectAWZSwizzled) // 或者 NSObject 元类的 AWZ 方法已经被标记需要 swizzled 了
         {
             // already custom, nothing would change
+            // 已经是自定义的 AWZ，就什么都不做
             return;
         }
 
-        bool swizzlingNSObject = NO;
-        if (cls == metaclassNSObject) {
-            swizzlingNSObject = YES;
-        } else {
+        bool swizzlingNSObject = NO; // 标记是否 swizzle NSObject 元类中的 AWZ 方法
+        if (cls == metaclassNSObject) { // 如果 cls 类就是 NSObject 元类，
+            swizzlingNSObject = YES; // 就标记需要 swizzle NSObject元类中的 AWZ 方法
+        }
+        else {
             // Don't know the class. 
             // The only special case is metaclass NSObject.
+            // 不清楚 cls 类，唯一的特例就是 NSObject 元类
+            // 遍历 NSObject 元类的方法列表
             for (const auto& meth2 : metaclassNSObject->data()->methods) {
-                if (meth == &meth2) {
-                    swizzlingNSObject = YES;
+                if (meth == &meth2) { // 当有方法与 meth 地址相同
+                    swizzlingNSObject = YES; // 就标记为需要 swizzle NSObject 元类中的 AWZ 方法
                     break;
                 }
             }
         }
-        if (swizzlingNSObject) {
-            if (metaclassNSObject->isInitialized()) {
-                metaclassNSObject->setHasCustomAWZ();
+        if (swizzlingNSObject) { // 如果需要 swizzle NSObject 元类中的 AWZ 方法
+            if (metaclassNSObject->isInitialized()) { // 如果 NSObject 类已经被 Initialized 了
+                                                      // （元类不需要 initialize）
+                metaclassNSObject->setHasCustomAWZ(); // 就设置为有自定义 AWZ
             } else {
                 // NSObject not yet +initialized, so custom RR has not yet 
                 // been checked, and setInitialized() will not notice the 
-                // swizzle. 
+                // swizzle.
+                // NSObject 类还没有被 Initialized，就先标记一下需要 swizzle AWZ 方法，
+                // 当 NSObject 类被 initialize 以后，走到 setInitialized() 函数，里面会接着做处理
                 MetaclassNSObjectAWZSwizzled = YES;
             }
         }
@@ -6708,6 +6764,9 @@ updateCustomRR_AWZ(Class cls, method_t *meth)
 * The class must be nil or already realized. 
 * Locking: none
 **********************************************************************/
+// 取得 cls 类中成员变量的 ivarlayout，
+// layout 中记录了哪些是 strong 的 ivar
+// 调用者：_objc_dumpHeap() / arr_fixup_copied_references() / object_setIvar()
 const uint8_t *
 class_getIvarLayout(Class cls)
 {
@@ -6722,6 +6781,14 @@ class_getIvarLayout(Class cls)
 * The class must be nil or already realized. 
 * Locking: none
 **********************************************************************/
+// 取得 cls 类中的成员变量的 weakIvarLayout
+// weakIvarLayout 中记录了哪些是 weak 的 ivar
+// 调用者：_objc_dumpHeap()
+//        arr_fixup_copied_references()
+//        gc_fixup_weakreferences
+//        objc_weak_layout_for_address()
+//        object_getIvar()
+//        object_setIvar()
 const uint8_t *
 class_getWeakIvarLayout(Class cls)
 {
@@ -6739,54 +6806,80 @@ class_getWeakIvarLayout(Class cls)
 * fixme: sanity-check layout vs superclass?
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 设置 cls 类成员变量的 layout
+// cls 类必须是 under construction 正在构造中，未完成的类
 void
 class_setIvarLayout(Class cls, const uint8_t *layout)
 {
     if (!cls) return;
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
     
     // Can only change layout of in-construction classes.
     // note: if modifications to post-construction classes were 
     //   allowed, there would be a race below (us vs. concurrent GC scan)
+    
+    // cls 类必须是 under construction 正在构造中，未完成的类
+    // 如果 cls 类不是 under construction，就警告，并立即返回
     if (!(cls->data()->flags & RW_CONSTRUCTING)) {
         _objc_inform("*** Can't set ivar layout for already-registered "
                      "class '%s'", cls->nameForLogging());
         return;
     }
 
+    // 重新为 rw->ro 在堆中分配空间，使其可写
     class_ro_t *ro_w = make_ro_writeable(cls->data());
 
+    // 尝试释放老的 ivarLayout
     try_free(ro_w->ivarLayout);
+    
+    // 在堆中深拷贝一份新的 layout，赋值给 ivarLayout
     ro_w->ivarLayout = ustrdupMaybeNil(layout);
 }
 
 // SPI:  Instance-specific object layout.
-
+// 指定 cls 类的 ivarLayout 的存取器，存取器是一个函数指针，
+// 则取 cls 类的实例对象的 layout 时，就将对象作为参数传入函数，返回值就是 layout，见 _object_getIvarLayout()
 void
-_class_setIvarLayoutAccessor(Class cls, const uint8_t* (*accessor) (id object)) {
+_class_setIvarLayoutAccessor(Class cls, const uint8_t* (*accessor) (id object) /*函数指针*/) {
+    
     if (!cls) return;
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
+    // 重新为 rw->ro 在堆中分配空间，使其可写
     class_ro_t *ro_w = make_ro_writeable(cls->data());
 
     // FIXME:  this really isn't safe to free if there are instances of this class already.
-    if (!(cls->data()->flags & RW_HAS_INSTANCE_SPECIFIC_LAYOUT)) try_free(ro_w->ivarLayout);
-    ro_w->ivarLayout = (uint8_t *)accessor;
-    cls->setInfo(RW_HAS_INSTANCE_SPECIFIC_LAYOUT);
+    // 如果 cls 类已经有实例的话，这非常不安全
+    // 如果没有指定有 instance-specific object layout
+    if (!(cls->data()->flags
+          & RW_HAS_INSTANCE_SPECIFIC_LAYOUT)) {
+        try_free(ro_w->ivarLayout); // 就尝试将原来的 ivarLayout 释放
+    }
+    
+    ro_w->ivarLayout = (uint8_t *)accessor; // 将新的 ivarLayout 设为 accessor 存取器函数指针
+    
+    cls->setInfo(RW_HAS_INSTANCE_SPECIFIC_LAYOUT); // 将 cls 标记为有 instance-specific object layout
 }
 
+// 取得 cls 的实例 object 的 layout
 const uint8_t *
 _object_getIvarLayout(Class cls, id object) 
 {
     if (cls) {
+        // 取出 layout，里面可能是真的 layout，也可能是存取器的函数指针
         const uint8_t* layout = cls->data()->ro->ivarLayout;
+        
+        // 如果 cls 标记了有  instance-specific object layout
+        // 则 layout 里是存取器的函数指针
         if (cls->data()->flags & RW_HAS_INSTANCE_SPECIFIC_LAYOUT) {
+            // 强转为函数指针
             const uint8_t* (*accessor) (id object) = (const uint8_t* (*)(id))layout;
+            // 调用存取器函数，得到真的 layout
             layout = accessor(object);
         }
-        return layout;
+        return layout; // 返回 layout
     }
     return nil;
 }
@@ -6800,25 +6893,35 @@ _object_getIvarLayout(Class cls, id object)
 * fixme: sanity-check layout vs superclass?
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 设置 cls 类的 weakIvarLayout
+// 如果 layout 是 nil，则表示没有 weak 的成员变量
+// cls 类必须是 under construction 正在构造中，未完成的（既没有注册）
 void
 class_setWeakIvarLayout(Class cls, const uint8_t *layout)
 {
     if (!cls) return;
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
     
     // Can only change layout of in-construction classes.
     // note: if modifications to post-construction classes were 
     //   allowed, there would be a race below (us vs. concurrent GC scan)
+    
+    // cls 类必须是 under construction 正在构造中，未完成的
+    // 如果 cls 类不是 under construction 的，就报警告，并直接返回
     if (!(cls->data()->flags & RW_CONSTRUCTING)) {
         _objc_inform("*** Can't set weak ivar layout for already-registered "
                      "class '%s'", cls->nameForLogging());
         return;
     }
 
+    // 重新为 rw->ro 在堆中分配空间，使其可写
     class_ro_t *ro_w = make_ro_writeable(cls->data());
 
+    // 尝试释放原来的 weakIvarLayout
     try_free(ro_w->weakIvarLayout);
+    
+    // 在堆中深拷贝一份新的 layout，赋值给 weakIvarLayout
     ro_w->weakIvarLayout = ustrdupMaybeNil(layout);
 }
 
@@ -6828,20 +6931,23 @@ class_setWeakIvarLayout(Class cls, const uint8_t *layout)
 * fixme
 * Locking: read-locks runtimeLock
 **********************************************************************/
-Ivar 
+// 从 cls 及其祖宗类里寻找，名为 name 的成员变量，
+// 返回值是成员变量的地址，
+// memberOf 是输出参数，代表该成员变量实际是属于哪个类的
+Ivar
 _class_getVariable(Class cls, const char *name, Class *memberOf)
 {
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
 
-    for ( ; cls; cls = cls->superclass) {
-        ivar_t *ivar = getIvar(cls, name);
-        if (ivar) {
-            if (memberOf) *memberOf = cls;
-            return ivar;
+    for ( ; cls; cls = cls->superclass) { // 遍历 cls 类及其祖宗类
+        ivar_t *ivar = getIvar(cls, name); // 查找名为 name 的成员变量
+        if (ivar) { // 如果找到了
+            if (memberOf) *memberOf = cls; // 就记录下该成员变量是属于哪个类的
+            return ivar; // 将成员变量返回
         }
     }
 
-    return nil;
+    return nil; // 找不到，就返回 nil
 }
 
 
@@ -6850,19 +6956,25 @@ _class_getVariable(Class cls, const char *name, Class *memberOf)
 * fixme
 * Locking: read-locks runtimeLock
 **********************************************************************/
+// 判断 cls 类是否遵守 proto_gen 协议
+// 调用者：+[NSObject conformsToProtocol:] / -[NSObject conformsToProtocol:] / class_addProtocol()
 BOOL class_conformsToProtocol(Class cls, Protocol *proto_gen)
 {
     protocol_t *proto = newprotocol(proto_gen);
     
+    // 类和协议都不能为 nil，否则默认为不遵守
     if (!cls) return NO;
     if (!proto_gen) return NO;
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
 
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // cls 必须是 realized 的
 
+    // 遍历 cls 类遵守的 协议列表数组
     for (const auto& proto_ref : cls->data()->protocols) {
-        protocol_t *p = remapProtocol(proto_ref);
+        protocol_t *p = remapProtocol(proto_ref); // 取得重映射后的 p 协议
+        // 如果 p 协议 与 proto_gen 协议是同一个，那么 cls 遵守 p 协议就等于遵守 proto_gen 协议
+        // 或者 p 协议 遵守 proto_gen 协议，即 p 协议中的一个子协议与 proto_gen 协议相同，也即 proto_gen 协议是 p 协议的子集，那么 cls 遵守 p 协议，就一定遵守 proto_gen 协议
         if (p == proto || protocol_conformsToProtocol_nolock(p, proto)) {
             return YES;
         }

@@ -5,7 +5,7 @@
 #ifndef _OBJC_NSOBJECT_H_
 #define _OBJC_NSOBJECT_H_
 
-#if __OBJC__
+#if __OBJC__ // 不知道干嘛用的，也找不到在哪里定义的
 
 #include <objc/objc.h>
 #include <objc/NSObjCRuntime.h>
