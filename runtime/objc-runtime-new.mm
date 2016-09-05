@@ -1938,9 +1938,11 @@ static NXMapTable *protocols(void)
 * Locking: runtimeLock must be read- or write-locked by the caller.
 **********************************************************************/
 // 从 protocol_map 中根据协议名 name 查找对应的协议
+// 调用者：objc_allocateProtocol() / objc_getProtocol() /
+//           readProtocol() / remapProtocol()
 static Protocol *getProtocol(const char *name)
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // 需要事先加锁
 
     // Try name as-is.
     // 先用直接用 name 查找
@@ -4950,10 +4952,10 @@ protocol_addProperty(Protocol *proto_gen,
 * This requires all classes be realized, which is regretfully non-lazy. 很抱歉是非惰性的
 * Locking: acquires runtimeLock
 **********************************************************************/
-// 取得 runtime 中所有已注册的类，
+// 取得 runtime 中所有已注册的类，但是限制了数量，
 // 这个函数会将 runtime 中所有类都 realize 了，因为这是非惰性的，所以会比较慢，
 // buffer: 是一个已经分配好内存的数组，用来存储所有已注册的类的指针，
-// bufferLen: 分配给 buffer 的内存长度，即 buffer 中最多可以存多少个类的指针，
+// bufferLen: 分配给 buffer 的内存长度，即 buffer 中最多可以存多少个类的指针，这限制了类的数量，
 // 返回值是 runtime 中所有已注册的类的总数，
 // 如果 bufferLen 小于总数，则得到的是一个子集
 int 
@@ -5000,30 +5002,37 @@ objc_getClassList(Class *buffer, int bufferLen)
 * freed with free().
 * Locking: write-locks runtimeLock
 **********************************************************************/
-//
+// 拷贝出 runtime 中的所有已注册的类，与 objc_getClassList() 不同的是，没有限制数量，有多少取多少
+// 这个函数会将 runtime 中所有类都 realize 了，因为这是非惰性的，所以会比较慢，
+// 返回值是一个数组，数组在堆中分配，调用者需要负责释放它，里面的元素是所有类的地址，数组最后一个元素是 nil，
+// outCount 是输出参数，记录了数组中类的个数，不包括最后的 nil，
 Class *
 objc_copyClassList(unsigned int *outCount)
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁，因为需要 realize 所有类
 
-    realizeAllClasses();
+    realizeAllClasses(); // 将 runtime 中所有类都 realize 了，因为这是非惰性的，所以会比较慢
 
     Class *result = nil;
-    NXHashTable *classes = realizedClasses();
+    NXHashTable *classes = realizedClasses(); // 获得 realized_class_hash 哈希表，里面存了所有已被 realized 的类
     unsigned int count = NXCountHashTable(classes);
 
-    if (count > 0) {
+    if (count > 0) { // realized_class_hash 哈希表里有东西，才从中取
         Class cls;
         NXHashState state = NXInitHashState(classes);
+        // 在堆中为 result 开辟足够大的空间，1+count 是为了在末尾放 nil
         result = (Class *)malloc((1+count) * sizeof(Class));
         count = 0;
+        // 遍历哈希表，逐个将类放入 result 数组中
         while (NXNextHashState(classes, &state, (void **)&cls)) {
             result[count++] = cls;
         }
+        // 数组最后一个元素放 nil
         result[count] = nil;
     }
-        
-    if (outCount) *outCount = count;
+    
+    if (outCount) *outCount = count; // 记录下数组中有多少类
+    
     return result;
 }
 
@@ -5033,35 +5042,42 @@ objc_copyClassList(unsigned int *outCount)
 * Returns pointers to all protocols.
 * Locking: read-locks runtimeLock
 **********************************************************************/
-Protocol * __unsafe_unretained * 
+// 拷贝出 runtime 中所有的协议，
+// 返回值是一个数组，数组在堆中分配，调用者需要负责释放它，里面的元素是所有协议的地址，数组最后一个元素是 nil，
+// outCount 是输出参数，记录了数组中协议的个数，不包括最后的 nil，
+Protocol * __unsafe_unretained *
 objc_copyProtocolList(unsigned int *outCount) 
 {
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁，没有对协议们再做其他的操作，所以只加读锁
 
-    NXMapTable *protocol_map = protocols();
+    NXMapTable *protocol_map = protocols(); // 取得存储所有协议的映射表
 
-    unsigned int count = NXCountMapTable(protocol_map);
-    if (count == 0) {
+    unsigned int count = NXCountMapTable(protocol_map); // 映射表中的元素数目
+    if (count == 0) { // 如果映射表里压根没东西，就直接返回
         if (outCount) *outCount = 0;
         return nil;
     }
 
+    // 给 result 数组在堆中分配足够大的空间，count+1 是为了在末尾放 nil
     Protocol **result = (Protocol **)malloc((count+1) * sizeof(Protocol*));
 
     unsigned int i = 0;
     Protocol *proto;
     const char *name;
     NXMapState state = NXInitMapState(protocol_map);
+    
+    // 遍历映射表，逐一将协议放入 result 数组中
     while (NXNextMapState(protocol_map, &state, 
                           (const void **)&name, (const void **)&proto))
     {
         result[i++] = proto;
     }
     
-    result[i++] = nil;
+    result[i++] = nil; // 最后一个位置放 nil
     assert(i == count+1);
 
-    if (outCount) *outCount = count;
+    if (outCount) *outCount = count; // 记录协议的个数
+    
     return result;
 }
 
@@ -5071,6 +5087,8 @@ objc_copyProtocolList(unsigned int *outCount)
 * Get a protocol by name, or return nil
 * Locking: read-locks runtimeLock
 **********************************************************************/
+// 根据协议名 name 查找对应的协议，调用 getProtocol() 完成查找，
+// 与之不同的是，加了读锁
 Protocol *objc_getProtocol(const char *name)
 {
     rwlock_reader_t lock(runtimeLock); 
@@ -5083,36 +5101,43 @@ Protocol *objc_getProtocol(const char *name)
 * fixme
 * Locking: read-locks runtimeLock
 **********************************************************************/
+// 拷贝出 cls 类中的所有方法，
+// 返回值是个数组，在堆中分配，里面存了 cls 类中的所有方法的地址，
+// outCount 是输出参数，记录了数组中方法的数目
 Method *
 class_copyMethodList(Class cls, unsigned int *outCount)
 {
     unsigned int count = 0;
     Method *result = nil;
 
-    if (!cls) {
+    if (!cls) { // 方法为 nil，没法儿玩，直接返回 nil
         if (outCount) *outCount = 0;
         return nil;
     }
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
     
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // cls 必须是已经被 realized 的
 
-    count = cls->data()->methods.count();
+    count = cls->data()->methods.count(); // 取得 cls 类中方法的数目
 
-    if (count > 0) {
+    if (count > 0) { // cls 中有方法，才进行拷贝
+        
+        // 为 result 数组在堆中开辟足够大的空间，count+1 是为了在末尾放 nil
         result = (Method *)malloc((count + 1) * sizeof(Method));
         
+        // 遍历 cls 类的方法列表数组，将方法逐一插入到 result 数组中
         count = 0;
         for (auto& meth : cls->data()->methods) {
-            if (! ignoreSelector(meth.name)) {
+            if (! ignoreSelector(meth.name)) { // 忽略需要被 ingore 的方法
                 result[count++] = &meth;
             }
         }
-        result[count] = nil;
+        result[count] = nil; // 最后一个位置放 nil
     }
 
-    if (outCount) *outCount = count;
+    if (outCount) *outCount = count; // 记录数组中方法的数目
+    
     return result;
 }
 
@@ -5122,6 +5147,9 @@ class_copyMethodList(Class cls, unsigned int *outCount)
 * fixme
 * Locking: read-locks runtimeLock
 **********************************************************************/
+// 拷贝出 cls 类的所有成员变量，
+// 返回值是数组，在堆中分配，里面存了所有成员变量的地址，
+//
 Ivar *
 class_copyIvarList(Class cls, unsigned int *outCount)
 {
