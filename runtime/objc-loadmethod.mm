@@ -29,29 +29,29 @@
 #include "objc-loadmethod.h"
 #include "objc-private.h"
 
-typedef void(*load_method_t)(id, SEL);
+typedef void(*load_method_t)(id, SEL); // 用于 +load 方法的 imp 类型
 
-struct loadable_class {
+struct loadable_class { // 需要被调用 +load 方法的类
     Class cls;  // may be nil
-    IMP method;
+    IMP method; // +load 方法对应的 imp
 };
 
-struct loadable_category {
+struct loadable_category { // 需要被调用 +load 方法的分类
     Category cat;  // may be nil
-    IMP method;
+    IMP method; // +load 方法对应的 imp
 };
 
 
 // List of classes that need +load called (pending superclass +load)
 // This list always has superclasses first because of the way it is constructed
-static struct loadable_class *loadable_classes = nil;
-static int loadable_classes_used = 0;
-static int loadable_classes_allocated = 0;
+static struct loadable_class *loadable_classes = nil; // 这个列表中存放所有需要调用 +load 方法的类
+static int loadable_classes_used = 0; // loadable_classes 列表中已经被使用了多少个位置
+static int loadable_classes_allocated = 0; // loadable_classes 列表开辟了多少位置，如果位置不够用了，会进行扩容
 
 // List of categories that need +load called (pending parent class +load)
-static struct loadable_category *loadable_categories = nil; // 需要执行 +load 的分类
-static int loadable_categories_used = 0; // loadable_categories 中元素的数量
-static int loadable_categories_allocated = 0;
+static struct loadable_category *loadable_categories = nil; // 这个列表中存放所有需要执行 +load 方法的分类
+static int loadable_categories_used = 0; // loadable_categories 列表中已经被使用了多少个位置
+static int loadable_categories_allocated = 0; // loadable_categories 列表开辟了多少位置，如果位置不够用了，会进行扩容
 
 
 /***********************************************************************
@@ -59,31 +59,42 @@ static int loadable_categories_allocated = 0;
 * Class cls has just become connected. Schedule it for +load if
 * it implements a +load method.
 **********************************************************************/
+// 将 cls 类添加到 loadable_classes 列表中，
+// 其中会检查 cls 类是否确实有 +load 方法，只有拥有 +load 方法，并且确实有对应的 imp，才会将其添加到 loadable_classes 列表，
+// 调用者：schedule_class_load()
 void add_class_to_loadable_list(Class cls)
 {
     IMP method;
 
-    loadMethodLock.assertLocked();
+    loadMethodLock.assertLocked(); // loadMethodLock 需要事先加锁
 
-    method = cls->getLoadMethod();
+    method = cls->getLoadMethod(); // 取得 cls 类的 +load 方法的 imp
+    
     if (!method) return;  // Don't bother if cls has no +load method
+                        // 如果 cls 类压根儿就没有 +load 方法，那也没有将其添加到 loadable_classes 列表的必要
+                        // 直接返回
     
     if (PrintLoading) {
         _objc_inform("LOAD: class '%s' scheduled for +load", 
                      cls->nameForLogging());
     }
     
+    // 如果 loadable_classes 列表已经满了
     if (loadable_classes_used == loadable_classes_allocated) {
+        // 重新计算一下新的大小
         loadable_classes_allocated = loadable_classes_allocated*2 + 16;
+        // 重新开辟新的内存空间，并将原来的数据拷贝过去
         loadable_classes = (struct loadable_class *)
             realloc(loadable_classes,
                               loadable_classes_allocated *
                               sizeof(struct loadable_class));
     }
     
+    // cls 插入到列表末尾
     loadable_classes[loadable_classes_used].cls = cls;
     loadable_classes[loadable_classes_used].method = method;
-    loadable_classes_used++;
+    
+    loadable_classes_used++; // 元素数量 +1
 }
 
 
@@ -189,33 +200,37 @@ void remove_category_from_loadable_list(Category cat)
 * Called only by call_load_methods().
 **********************************************************************/
 // 调用 loadable_classes 中所有类的 +load 方法
-// 但是如果新的类变为 loadable，是不会调用它们的 +load 方法的
+// 会先将列表暂存起来，然后将原来的列表清空，
+// 后面会只调用暂存起来的类的 +load，而新列表中即使插入了新的类，也不管它们，
 // 调用者：call_load_methods()
 static void call_class_loads(void)
 {
     int i;
     
     // Detach current loadable list.
-    struct loadable_class *classes = loadable_classes;
-    int used = loadable_classes_used;
-    loadable_classes = nil;
-    loadable_classes_allocated = 0;
-    loadable_classes_used = 0;
+    struct loadable_class *classes = loadable_classes; // 先将列表暂存起来，即另一个指针指向列表的内存
+    int used = loadable_classes_used; // 暂存列表中类的数量
+    loadable_classes = nil; // loadable_classes 指向指向 nil，与原来的列表脱离关系
+    loadable_classes_allocated = 0; // 容量清零
+    loadable_classes_used = 0; // 类的个数清零
     
     // Call all +loads for the detached list.
-    for (i = 0; i < used; i++) {
+    for (i = 0; i < used; i++) { // 遍历暂存的列表
         Class cls = classes[i].cls;
+        // 取得该类的 +load 方法的 imp
         load_method_t load_method = (load_method_t)classes[i].method;
-        if (!cls) continue; 
+        if (!cls) continue;  // 如果 imp 不存在，没得玩，跳过
+                             // 一般情况下，不会这么糟糕，因为 add_class_to_loadable_list() 中对
+                             // 没有 +load imp 的类进行了排除
 
         if (PrintLoading) {
             _objc_inform("LOAD: +[%s load]\n", cls->nameForLogging());
         }
-        (*load_method)(cls, SEL_load);
+        (*load_method)(cls, SEL_load); // 直接调用 +load 的 imp 函数，跳过 objc_msgSend 速度更快
     }
     
     // Destroy the detached list.
-    if (classes) free(classes);
+    if (classes) free(classes); // 将暂存的列表销毁释放
 }
 
 
@@ -232,6 +247,7 @@ static void call_class_loads(void)
 * Called only by call_load_methods().
 **********************************************************************/
 // 调用分类中的 +load 方法
+// 调用者：call_load_methods()
 static bool call_category_loads(void)
 {
     int i, shift;

@@ -1042,7 +1042,7 @@ static bool scanMangledField(const char *&string, const char *end,
 * The result must be freed with free().
 **********************************************************************/
 // 取得指定的 Swift-v1-mangled 的类或协议的 demangled name，
-// 因为 swift 的类或协议的名字 会被重整为 swift 形式的名字，而现在，就是取得它们重整前的名字
+// 因为 swift 的类或协议的名字 会被重整为 swift 形式的名字，而现在，就是取得它们取消重整后的名字
 // 如果指定的类或协议压根儿就不是 swift 的，就会返回 nil，
 // 返回的结果字符串是堆上的，所以需要调用方释放
 static char *copySwiftV1DemangledName(const char *string, bool isProtocol = false)
@@ -1094,6 +1094,7 @@ static char *copySwiftV1DemangledName(const char *string, bool isProtocol = fals
  将给定的类名或者协议名处理成 Swift 1.0 的 mangled name(重整名字) 的格式
  如果 string 与 unmangled(重整前) 的格式不符合，就返回 nil，
  结果是在堆中分配的，所以调用方需要负责 free 它
+ 调用者：getClass() / getProtocol()
 **********************************************************************/
 static char *copySwiftV1MangledName(const char *string, bool isProtocol = false)
 {
@@ -1190,7 +1191,7 @@ static Class getClass(const char *name)
     
     // Try Swift-mangled equivalent of the given name.
     if (char *swName = copySwiftV1MangledName(name)) { // 尝试转成 swift mangled name，函数里判断 name 是否符合
-                                                       // swift unmangled name 的格式，如果符合就返回 mangled name，
+                                                       // swift unmangled name(重整前的名字) 的格式，如果符合就返回 mangled name，
                                                        // 否则返回 nil
         result = getClass_impl(swName); // 用 mangled name 再去找
         free(swName); // 将 swName 释放，原因见 copySwiftV1MangledName()
@@ -1563,7 +1564,6 @@ static void addRemappedClass(Class oldcls, Class newcls)
 **********************************************************************/
 // 返回 cls 类的 live class（活动的类）指针，这个指针可能指向一个已经被 reallocated 的结构体（#疑问：什么意思？？）
 // 若 cls 是 weak linking（弱连接），则 cls 会被忽略，而返回 nil
-// 好拗口，这个函数其实就是从 remapped_class_map 以 cls 为 key ，取出 realized 后的 future class
 // 调用者 ：_class_remap() / missingWeakSuperclass() / realizeClass() /
 //         remapClass() / remapClassRef()
 static Class remapClass(Class cls)
@@ -3534,6 +3534,7 @@ static void schedule_class_load(Class cls)
     schedule_class_load(cls->superclass); // 递归，确保在 loadable_classes 列表中父类排在前面
 
     add_class_to_loadable_list(cls); // 将 cls 类添加到 loadable_classes 列表中
+                                     // 其中会检查 cls 类是否确实有 +load 方法，只有拥有 +load 方法，才会将其添加到 loadable_classes 列表
     
     cls->setInfo(RW_LOADED); // 将 cls 类设置为已经 load
 }
@@ -4273,7 +4274,7 @@ _protocol_getMethodTypeEncoding(Protocol *proto_gen, SEL sel,
 * Returns the (Swift-demangled) name of the given protocol.
 * Locking: none
 **********************************************************************/
-// 取得重整前的协议名称
+// 取得取消重整后的协议名称
 const char *
 protocol_t::demangledName()
 {
@@ -4312,7 +4313,7 @@ protocol_getName(Protocol *proto)
         return "nil"; // 如果 proto 是 nil，就返回 nil
     }
     else {
-        return newprotocol(proto)->demangledName(); // 否则，返回 proto 重整前的名字
+        return newprotocol(proto)->demangledName(); // 否则，返回 proto 取消重整后的名字
     }
 }
 
@@ -5110,7 +5111,7 @@ class_copyMethodList(Class cls, unsigned int *outCount)
     unsigned int count = 0;
     Method *result = nil;
 
-    if (!cls) { // 方法为 nil，没法儿玩，直接返回 nil
+    if (!cls) { // cls 为 nil，没法儿玩，直接返回 nil
         if (outCount) *outCount = 0;
         return nil;
     }
@@ -5149,7 +5150,7 @@ class_copyMethodList(Class cls, unsigned int *outCount)
 **********************************************************************/
 // 拷贝出 cls 类的所有成员变量，
 // 返回值是数组，在堆中分配，里面存了所有成员变量的地址，
-//
+// outCount 是输出参数，记录了数组中成员变量的数目
 Ivar *
 class_copyIvarList(Class cls, unsigned int *outCount)
 {
@@ -5157,26 +5158,32 @@ class_copyIvarList(Class cls, unsigned int *outCount)
     Ivar *result = nil;
     unsigned int count = 0;
 
-    if (!cls) {
+    if (!cls) { // cls 为 nil，没法儿玩，直接返回 nil
         if (outCount) *outCount = 0;
         return nil;
     }
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
 
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // cls 必须是已经被 realized 的
     
+    // 如果 ro 中有成员变量列表，且列表中有成员变量
     if ((ivars = cls->data()->ro->ivars)  &&  ivars->count) {
+        
+        // 为 result 数组在堆中开辟足够大的空间，count+1 是为了在末尾放 nil
         result = (Ivar *)malloc((ivars->count+1) * sizeof(Ivar));
         
+        // 遍历成员变量列表，将成员变量逐一放入 result 数组中
         for (auto& ivar : *ivars) {
-            if (!ivar.offset) continue;  // anonymous bitfield
+            if (!ivar.offset) continue; // 偏移量为 0，说明是 anonymous bitfield(匿名的位)，
+                                        // 不是正常的成员变量，直接忽略
             result[count++] = &ivar;
         }
-        result[count] = nil;
+        
+        result[count] = nil; // 最后一个位置放 nil
     }
     
-    if (outCount) *outCount = count;
+    if (outCount) *outCount = count; // 记录数组中元素的个数
     return result;
 }
 
@@ -5188,32 +5195,42 @@ class_copyIvarList(Class cls, unsigned int *outCount)
 * Does not copy any superclass's properties.
 * Locking: read-locks runtimeLock
 **********************************************************************/
+// 返回 cls 类的所有属性
+// 返回值是数组，在堆中分配，里面存了所有属性的地址，因为是堆中分配的，所以调用者需要负责释放，
+// outCount 是输出参数，记录了数组中属性的数目
 objc_property_t *
 class_copyPropertyList(Class cls, unsigned int *outCount)
 {
-    if (!cls) {
+    if (!cls) { // cls 为 nil，没法儿玩，直接返回 nil
         if (outCount) *outCount = 0;
         return nil;
     }
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
 
-    assert(cls->isRealized());
-    auto rw = cls->data();
+    assert(cls->isRealized()); // cls 必须是已经被 realized 的
+    auto rw = cls->data(); // 取得 rw
 
     property_t **result = nil;
-    unsigned int count = rw->properties.count();
-    if (count > 0) {
+    unsigned int count = rw->properties.count(); // 取得 cls 的属性列表中的属性数目
+    
+    if (count > 0) { // 列表中确定有属性，才进行拷贝
+        
+        // 为 result 数组在堆中开辟足够大的空间，count+1 是为了在末尾放 nil
         result = (property_t **)malloc((count + 1) * sizeof(property_t *));
 
         count = 0;
+        
+        // 遍历属性列表，将成员变量逐一放入 result 数组中
         for (auto& prop : rw->properties) {
             result[count++] = &prop;
         }
-        result[count] = nil;
+        
+        result[count] = nil; // 最后一个位置放 nil
     }
 
-    if (outCount) *outCount = count;
+    if (outCount) *outCount = count; // 记录数组中元素的个数
+    
     return (objc_property_t *)result;
 }
 
@@ -5224,29 +5241,31 @@ class_copyPropertyList(Class cls, unsigned int *outCount)
 * Called only from add_class_to_loadable_list.
 * Locking: runtimeLock must be read- or write-locked by the caller.
 **********************************************************************/
+// 取得类的 +load 方法的 imp 
+// 调用者：add_class_to_loadable_list()
 IMP 
 objc_class::getLoadMethod()
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // runtimeLock 需要事先加锁
 
     const method_list_t *mlist;
 
-    assert(isRealized());
-    assert(ISA()->isRealized());
-    assert(!isMetaClass());
-    assert(ISA()->isMetaClass());
+    assert(isRealized()); // 该类必须是 realized 过的
+    assert(ISA()->isRealized()); // 元类也必须是 realized 过的
+    assert(!isMetaClass()); // 该类不能是元类
+    assert(ISA()->isMetaClass()); // 该类的 isa 必须是元类
 
-    mlist = ISA()->data()->ro->baseMethods();
+    mlist = ISA()->data()->ro->baseMethods(); // +load 是类方法，所以存在了元类中，取出元类的 ro 中的方法列表
     if (mlist) {
-        for (const auto& meth : *mlist) {
+        for (const auto& meth : *mlist) { // 遍历元类的方法列表，
             const char *name = sel_cname(meth.name);
-            if (0 == strcmp(name, "load")) {
-                return meth.imp;
+            if (0 == strcmp(name, "load")) { // 寻找名字叫 "load" 的方法
+                return meth.imp; // 如果找到了，就返回该方法的 imp
             }
         }
     }
 
-    return nil;
+    return nil; // 找不到就返回 nil
 }
 
 
@@ -5255,6 +5274,9 @@ objc_class::getLoadMethod()
 * Returns a category's name.
 * Locking: none
 **********************************************************************/
+// 取得分类的名字，完全理解不了这种函数存在的意义啊....
+// 调用者：add_category_to_loadable_list() / call_category_loads() /
+//            remove_category_from_loadable_list()
 const char *
 _category_getName(Category cat)
 {
@@ -5269,11 +5291,13 @@ _category_getName(Category cat)
 * remove_category_from_loadable_list for logging purposes.
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+// 取得分类所属类的类名
+// 调用者：add_category_to_loadable_list() / remove_category_from_loadable_list()
 const char *
 _category_getClassName(Category cat)
 {
-    runtimeLock.assertLocked();
-    return remapClass(cat->cls)->nameForLogging();
+    runtimeLock.assertLocked(); // runtimeLock 需要事先加锁
+    return remapClass(cat->cls)->nameForLogging(); // 取得 cat->cls 对应的重映射后的类，并取得类名
 }
 
 
@@ -5283,11 +5307,15 @@ _category_getClassName(Category cat)
 * Called only by call_category_loads.
 * Locking: read-locks runtimeLock
 **********************************************************************/
+// 取得分类所属的类
+// 调用者：call_category_loads()
 Class 
 _category_getClass(Category cat)
 {
-    rwlock_reader_t lock(runtimeLock);
-    Class result = remapClass(cat->cls);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
+    
+    Class result = remapClass(cat->cls); // 取得 cat->cls 对应的重映射后的类
+    
     assert(result->isRealized());  // ok for call_category_loads' usage
     return result;
 }
@@ -5299,24 +5327,25 @@ _category_getClass(Category cat)
 * Called only from add_category_to_loadable_list
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
+// 取得分类的 +load 方法对应的 imp，如果没有 +load 方法，就返回 nil
 IMP 
 _category_getLoadMethod(Category cat)
 {
-    runtimeLock.assertLocked();
+    runtimeLock.assertLocked(); // runtimeLock 需要事先加锁
 
     const method_list_t *mlist;
 
-    mlist = cat->classMethods;
+    mlist = cat->classMethods; // 取得分类的类方法列表，因为 +load 也是类方法，位于类方法列表中
     if (mlist) {
-        for (const auto& meth : *mlist) {
+        for (const auto& meth : *mlist) { // 遍历类方法列表，查找名为 "load" 的方法
             const char *name = sel_cname(meth.name);
             if (0 == strcmp(name, "load")) {
-                return meth.imp;
+                return meth.imp; // 如果找到了，就将方法的 imp 返回
             }
         }
     }
 
-    return nil;
+    return nil; // 没有 +load 方法，就返回 nil
 }
 
 
@@ -5325,34 +5354,43 @@ _category_getLoadMethod(Category cat)
 * fixme
 * Locking: read-locks runtimeLock
 **********************************************************************/
+// 拷贝出 cls 类的协议列表
+// 返回值是一个数组，在堆中分配，调用者需要负责释放它，
+// 数组中存了 cls 类的所有协议的地址
+// outCount 是输出参数，记录了数组中协议的数目，不包括末尾的 nil
 Protocol * __unsafe_unretained * 
 class_copyProtocolList(Class cls, unsigned int *outCount)
 {
     unsigned int count = 0;
     Protocol **result = nil;
     
-    if (!cls) {
+    if (!cls) { // cls 为 nil，没法儿玩，直接返回 nil
         if (outCount) *outCount = 0;
         return nil;
     }
 
-    rwlock_reader_t lock(runtimeLock);
+    rwlock_reader_t lock(runtimeLock); // runtimeLock 加读锁
 
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // cls 必须是已经 realized 的
     
-    count = cls->data()->protocols.count();
+    count = cls->data()->protocols.count(); // cls 中协议的个数
 
-    if (count > 0) {
+    if (count > 0) { // 有协议才进行拷贝
+        
+        // 为 result 数组开辟一块足够大的内存，count+1 是为了在末尾加 nil
         result = (Protocol **)malloc((count+1) * sizeof(Protocol *));
 
+        // 遍历协议列表数组，将协议一一插入到 result 数组中
         count = 0;
         for (const auto& proto : cls->data()->protocols) {
-            result[count++] = (Protocol *)remapProtocol(proto);
+            result[count++] = (Protocol *)remapProtocol(proto); // 插入的是重映射后的协议
         }
-        result[count] = nil;
+        
+        result[count] = nil; // 数组最后一个位置放 nil
     }
 
-    if (outCount) *outCount = count;
+    if (outCount) *outCount = count; // 记录了数组中协议的数目，不包括末尾的 nil
+    
     return result;
 }
 
@@ -5362,32 +5400,48 @@ class_copyProtocolList(Class cls, unsigned int *outCount)
 * fixme
 * Locking: write-locks runtimeLock
 **********************************************************************/
+// 拷贝出镜像中所有类的名字
+// 返回值是一个数组，数组在堆中分配，所以调用者需要负责释放它，
+// 数组中存了镜像中所有类的名字字符串的地址，名字是 demangledName，即取消重整的正常点的名字，
+// 会忽略 weak-linked 的类，
+// outCount 是输出参数，记录了数组中字符串地址的个数
 const char **
 _objc_copyClassNamesForImage(header_info *hi, unsigned int *outCount)
 {
     size_t count, i, shift;
     classref_t *classlist;
-    const char **names;
+    const char **names; // 返回值，是一个数组
     
     // Need to write-lock in case demangledName() needs to realize a class.
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁，因为后面 cls->demangledName(true);
+                                       // 指定了 cls 如果没有 realized 的话，就将其 realize 了
     
+    // 获得镜像中所有 objective-2.0 类的列表
     classlist = _getObjc2ClassList(hi, &count);
+    
+    // 为 names 在堆中开辟一块足够大的内存空间，count+1 是为了在末尾放 nil
     names = (const char **)malloc((count+1) * sizeof(const char *));
     
-    shift = 0;
+    shift = 0; // 需要移动的格数
+    
+    // 遍历镜像中的类列表
     for (i = 0; i < count; i++) {
-        Class cls = remapClass(classlist[i]);
+        Class cls = remapClass(classlist[i]); // 取得重映射后的类
         if (cls) {
+            // 如果 cls 存在，即它是 live class，就取得它取消重整后的名字
+            // 并指定 demangledName() 函数，若该类未被 realized 的话，就将其 realize 了
+            // i-shift 是因为，有一些类可能是 weak-linked 的，会被跳过
             names[i-shift] = cls->demangledName(true/*realize*/);
-        } else {
+        }
+        else { // 忽略 weak-linked 的类
             shift++;  // ignored weak-linked class
         }
     }
-    count -= shift;
-    names[count] = nil;
+    count -= shift; // 总数需要减去被忽略的那些类
+    names[count] = nil; // 数组的最后一个位置放 nil
 
-    if (outCount) *outCount = (unsigned int)count;
+    if (outCount) *outCount = (unsigned int)count; // 记录数组中类的总数
+    
     return names;
 }
 
@@ -5398,15 +5452,23 @@ _objc_copyClassNamesForImage(header_info *hi, unsigned int *outCount)
  * interpreted relative to the first word aligned ivar of an object.
  * Locking: none
  **********************************************************************/
-
+// 获取类中的实例变量的起始地址
+// 调用者：_class_getInstanceStart()
 static uint32_t
 alignedInstanceStart(Class cls)
 {
     assert(cls);
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // cls 类必须是 realized 过的
+    
+    // 返回 ro->instanceStart，并进行字节对齐
     return (uint32_t)word_align(cls->data()->ro->instanceStart);
 }
 
+// 获取类中的实例变量的起始地址，
+// 类的实例变量是存在一个结构体里的，见 TestNSObject 里的 struct AXPerson_IMPL
+// 结构体中第一个变量是父类对应的结构体，里面存了父类的成员变量，
+// 从第二个变量开始才是本类的实例变量，这个函数就是获得这个实例变量的地址
+// 调用者：arr_fixup_copied_references() / object_getIvar() / object_setIvar()
 uint32_t _class_getInstanceStart(Class cls) {
     return alignedInstanceStart(cls);
 }
@@ -5417,20 +5479,24 @@ uint32_t _class_getInstanceStart(Class cls) {
 * Save a string in a thread-local FIFO buffer. 
 * This is suitable for temporary strings generated for logging purposes.
 **********************************************************************/
+// 存储一个字符串到 TLS 中的队列缓冲区（first in first out）
+// 因为是队列的长度是固定的，所以队列中的元素不会存活太长时间，存入的字符串必须尽快使用，不然就被释放了
 static void
 saveTemporaryString(char *str)
 {
     // Fixed-size FIFO. We free the first string, shift 
     // the rest, and add the new string to the end.
+    // 用 _objc_fetch_pthread_data() 取得这个线程的 线程数据. 如果 data 不存在，就为 data 开辟一块内存，
+    // 用 TLS 存起来， 然后将它返回
     _objc_pthread_data *data = _objc_fetch_pthread_data(true);
-    if (data->printableNames[0]) {
-        free(data->printableNames[0]);
+    if (data->printableNames[0]) { // 如果 printableNames 数组第一个元素有值
+        free(data->printableNames[0]); // 就将其释放
     }
-    int last = countof(data->printableNames) - 1;
-    for (int i = 0; i < last; i++) {
+    int last = countof(data->printableNames) - 1; // 取得 printableNames 数组的最后一个索引
+    for (int i = 0; i < last; i++) { // 遍历数组，将后面的元素(index>=1)向前挪一个单位
         data->printableNames[i] = data->printableNames[i+1];
     }
-    data->printableNames[last] = str;
+    data->printableNames[last] = str; // 将新的 str 放在末尾
 }
 
 
@@ -5440,22 +5506,35 @@ saveTemporaryString(char *str)
 * The returned memory is TEMPORARY. Print it or copy it immediately.
 * Locking: none
 **********************************************************************/
+// 返回类的名字，做了一些处理更适合显示，其实就是类取消重整后的名字，
+// 主要针对 swift 类，oc 类重整前后名字是一样的，而 swift 类重整后的名字加了乱七八糟的字符，不好看，
+// 取消重整后的名字没有了这些乱七八糟的字符，看上去正常一点
+// 返回的 char * 字符串存在临时的队列里，见 saveTemporaryString()，应立即使用或拷贝，否则很快就被释放了
 const char *
 objc_class::nameForLogging()
 {
     // Handle the easy case directly.
-    if (isRealized()  ||  isFuture()) {
+    if (isRealized()  ||  isFuture()) { // 如果该类已经被 realized 的 或 是 future 的
+        // 则查看类是否已经存了取消重整的名字，如果有，就将取消重整的名字返回
         if (data()->demangledName) return data()->demangledName;
     }
 
+    // 否则只能将 mangledName，重整后的名字处理一下，取得取消重整的名字
+    // 其实普通 OC 类，重整前后的名字是一样的，而 swift 类重整前后的名字不一样
+    
     char *result;
-
+    
     const char *name = mangledName();
-    char *de = copySwiftV1DemangledName(name);
-    if (de) result = de;
-    else result = strdup(name);
+    char *de = copySwiftV1DemangledName(name); // 如果是 swift 类，得到的是取消重整的字符串，如果是 oc 类，得到的 nil
+    if (de) {
+        result = de;
+    }
+    else {
+        result = strdup(name); // 如果是 oc 类，得到的是 nil，则直接用重整后的名字，所以 oc 类，重整前后的名字是一样的
+    }
 
-    saveTemporaryString(result);
+    saveTemporaryString(result); // 保存 result 字符串到临时的队列里
+    
     return result;
 }
 
@@ -5465,7 +5544,7 @@ objc_class::nameForLogging()
 * If realize=false, the class must already be realized or future.
 * Locking: If realize=true, runtimeLock must be held for writing by the caller.
 **********************************************************************/
-// 取得 demangledName 重整前的名字
+// 取得 demangledName 取消重整后的名字
 // 如果传入的参数 realize 是 false，那么类必须已经被 realized 或者 future
 // 否则就会对类做 realize 操作
 // 调用者：_objc_copyClassNamesForImage() / class_getName()
@@ -5481,10 +5560,10 @@ objc_class::demangledName(bool realize)
     }
 
     // Try demangling the mangled name.
-    // 先拿到 mangled 的名字，即重整前的名字
+    // 先拿到 mangled 的名字，即重整后的名字
     const char *mangled = mangledName();
     
-    // 然后进行 demangled，那么如果它是 swift 类，就会取得重整前的名字，否则得到的是 nil
+    // 然后进行 demangled，那么如果它是 swift 类，就会取得取消重整后的名字，否则得到的是 nil
     char *de = copySwiftV1DemangledName(mangled);
     
     // 如果类已经 Realized 或者 future
@@ -5547,8 +5626,10 @@ const char *class_getName(Class cls)
 {
     // 如果传入的是 nil，则返回 "nil"
     if (!cls) return "nil";
+    
     // 如果类既没有 realized 也没有 future，就报错
     assert(cls->isRealized()  ||  cls->isFuture());
+    
     // 返回类对象的 demangledName
     return cls->demangledName();
 }
@@ -5559,11 +5640,14 @@ const char *class_getName(Class cls)
 * fixme
 * Locking: none
 **********************************************************************/
+// 获取类的版本
 int 
 class_getVersion(Class cls)
 {
     if (!cls) return 0;
+    
     assert(cls->isRealized());
+    
     return cls->data()->version;
 }
 
@@ -5573,6 +5657,7 @@ class_getVersion(Class cls)
 * fixme
 * Locking: none
 **********************************************************************/
+// 设置类的版本
 void 
 class_setVersion(Class cls, int version)
 {
@@ -5581,7 +5666,8 @@ class_setVersion(Class cls, int version)
     cls->data()->version = version;
 }
 
-// 在一个有序的方法列表 list 中，查找 key 对应的方法，用的是二分查找，所以必须保证是有序数组
+// 在一个有序的方法列表 list 中，查找 key 对应的方法，用的是二分查找，所以必须保证 list 是有序数组
+// 调用者：search_method_list()
 static method_t *findMethodInSortedMethodList(SEL key, const method_list_t *list)
 {
     assert(list);
@@ -5626,6 +5712,8 @@ static method_t *findMethodInSortedMethodList(SEL key, const method_list_t *list
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
 // 搜索 mlist 列表中名字是 sel 的方法
+// 调用者：getMethodNoSuper_nolock() / methodListImplementsAWZ() /
+//          methodListImplementsRR() / protocol_getMethod_nolock()
 static method_t *search_method_list(const method_list_t *mlist, SEL sel)
 {
     // 方法列表是否被 fixedup，因为 fixupMethodList 里做了排序
@@ -5705,6 +5793,7 @@ getMethodNoSuper_nolock(Class cls, SEL sel)
 * Locking: runtimeLock must be read- or write-locked by the caller
 **********************************************************************/
 // 无锁版本的查找 cls 类中 sel 对应方法的函数，里面调用的还是 getMethodNoSuper_nolock() 函数
+// 调用者：_class_getMethod()
 static method_t *
 getMethod_nolock(Class cls, SEL sel)
 {
@@ -5732,6 +5821,7 @@ getMethod_nolock(Class cls, SEL sel)
 * Locking: read-locks runtimeLock
 **********************************************************************/
 // 静态的内部方法，查找 cls 类中 sel 对应的方法
+// 调用者：class_getInstanceMethod()
 static Method _class_getMethod(Class cls, SEL sel)
 {
     // 加读锁
@@ -5746,6 +5836,9 @@ static Method _class_getMethod(Class cls, SEL sel)
 * specified class and selector.
 **********************************************************************/
 // 取得 cls 类的中 sel 对应的方法，注意是 Method(method_t) 类型，并不只是 IMP
+// 会先用 lookUpImpOrNil 查找 selector，如果找不到会尝试 resolver，让开发者有机会动态插入 IMP
+// 然后调用 _class_getMethod 进行查找
+// 调用者：class_getClassMethod()
 Method class_getInstanceMethod(Class cls, SEL sel)
 {
     //
@@ -5756,19 +5849,20 @@ Method class_getInstanceMethod(Class cls, SEL sel)
     // This implementation is a bit weird(有点怪) because it's the only place that
     // wants a Method instead of an IMP.
 
-    // 这个实现有点怪，因为它重要 Method(method_t)，而不是 IMP
+    // 这个实现有点怪，因为它是要 Method(method_t)，而不是 IMP
     
 #warning fixme build and search caches
     
     // Search method lists, try method resolver, etc.
     
-    // 奇怪啊，在这里调用 lookUpImpOrNil 有什么意义呢，也不接返回值
+    // 调用 lookUpImpOrNil，是为了如果找不到的话，就尝试一下 resolver，让开发者有机会动态插入 IMP
     lookUpImpOrNil(cls, sel, nil, 
                    NO/*initialize*/, NO/*cache*/, YES/*resolver*/);
 
 #warning fixme build and search caches
 
-    // 调用 _class_getMethod 查找
+    // 调用 _class_getMethod() 查找，
+    // 有意思的是，_class_getMethod() 里面一层层调用最后使用的还是 getMethodNoSuper_nolock() 函数，这和 lookUpImpOrNil 中是一样的
     return _class_getMethod(cls, sel);
 }
 
@@ -5779,11 +5873,15 @@ Method class_getInstanceMethod(Class cls, SEL sel)
 * cls is the method whose cache should be filled. 
 * implementer is the class that owns the implementation in question.
 **********************************************************************/
+// 记录缓存日志，并将 sel->imp 对插入 cls 的方法缓存中
+// 调用者：lookUpImpOrForward()
 static void
-log_and_fill_cache(Class cls, IMP imp, SEL sel, id receiver, Class implementer)
+log_and_fill_cache(Class cls, IMP imp, SEL sel, id receiver,
+                   Class implementer) // implementer 和 cls 现在是一致，不知道以后会怎么样，理解不了
 {
 #if SUPPORT_MESSAGE_LOGGING
     if (objcMsgLogEnabled) {
+        // 记录日志文件，如果失败了，就直接返回
         bool cacheIt = logMessageSend(implementer->isMetaClass(), 
                                       cls->nameForLogging(),
                                       implementer->nameForLogging(), 
@@ -5791,6 +5889,7 @@ log_and_fill_cache(Class cls, IMP imp, SEL sel, id receiver, Class implementer)
         if (!cacheIt) return;
     }
 #endif
+    // 将 sel->imp 对插入 cls 的方法缓存中
     cache_fill (cls, sel, imp, receiver);
 }
 
@@ -5929,7 +6028,7 @@ IMP lookUpImpOrForward(Class cls, SEL sel, id inst,
                                     // 这与 _objc_ignored_method() 的做法是一致的
                                     // _objc_ignored_method 的实现源码也在 objc_msg_arm.s 文件中
         cache_fill(cls, sel, imp, inst); // 将 sel 和 imp(_objc_ignored_method) 插入到缓存中
-        goto done; // 就算是已经确定 IMP 了，完成，调到 done
+        goto done; // 就算是已经确定 IMP 了，完成，跳到 done
     }
 
     // Try this class's cache.

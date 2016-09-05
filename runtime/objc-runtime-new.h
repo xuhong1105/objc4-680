@@ -424,7 +424,7 @@ struct protocol_t : objc_object {
                                 // 它在 objc_allocateProtocol() 中被赋值，
                                 // 普通 oc 的协议重整前后的名字是一样的，而 swift 的协议重整前后名字不一样，
                                 // 重整名字是编译器给出的，加了 swift 复杂前缀的，用于混编时区分 oc协议 和 swift协议，
-                                // 而 demangledName 重整前的名称，应该就是去掉前缀的正常的名字
+                                // 而 demangledName 取消重整的名称，应该就是去掉前缀的正常的名字
     
     struct protocol_list_t *protocols;  // 子协议列表，见 protocol_addProtocol()
                                         // 又可以称为 incorporated protocols 合并的协议
@@ -448,12 +448,12 @@ struct protocol_t : objc_object {
     
     const char **extendedMethodTypes; // 扩展方法类型数组，每个元素是一个扩展类型字符串
     
-    const char *_demangledName; // 重整前的协议名称，为了兼容 swift 协议而准备的，
+    const char *_demangledName; // 取消重整的协议名称，为了兼容 swift 协议而准备的，
                                 // 普通 oc 的协议重整前后的名字是一样的，而 swift 的协议重整前后名字不一样
                                 // 见 demangledName()
-                                // demangledName 重整前的名称，应该就是去掉 swift 前缀的正常的名字
+                                // demangledName 取消重整的名称，应该就是去掉 swift 前缀的正常的名字
 
-    const char *demangledName(); // 取得重整前的协议名称
+    const char *demangledName(); // 取得取消重整的协议名称
 
     const char *nameForLogging() {
         return demangledName();
@@ -1251,7 +1251,8 @@ struct class_rw_t {
     
     uint32_t version; // 版本，元类是 7，普通类是 0
 
-    const class_ro_t *ro; // 一个指向常量的指针，其中存储了当前类在编译期就已经确定的属性、方法以及遵循的协议
+    const class_ro_t *ro; // 指向 ro 的指针，ro 中存储了当前类在编译期就已经确定的属性、方法以及遵循的协议
+                          // 成员变量也在其中
 
     method_array_t methods;  // 方法列表数组，每个元素是一个指针，指向一个方法列表 method_list_t，
                              // 前面是分类方法列表，一个分类一个列表，base methods list放在最后
@@ -1264,8 +1265,9 @@ struct class_rw_t {
                             // 从 foreach_realized_class_and_subclass_2 方法中对子类的遍历
                             // 可以看到确实是如此
 
-    char *demangledName; // 重整前的名字，为了兼容 swift 而准备的，普通 OC 类，重整前后的名字是一样的，
+    char *demangledName; // 取消重整的名字，为了兼容 swift 而准备的，普通 OC 类，重整前后的名字是一样的，
                          // 而 swift 类重整前后的名字不一样，见 objc_class::demangledName()
+                         // 取消重整的名字，没有乱七八糟的字符，看上去正常一点
 
     // 将 set 给定的 bit 位设为 1
     void setFlags(uint32_t set) 
@@ -1609,6 +1611,8 @@ struct objc_class : objc_object {
                         // 对外界隐藏了 class_data_bits_t
 
     // 取得 bits 中存的 data，就是 class_data_bits_t 里的 bits 中的 data 部分
+    // 在 realized 之前，data 存的是 ro，用的时候需要强转为 class_ro_t
+    // 在 realized 之后，存的才是 rw
     class_rw_t *data() { 
         return bits.data();
     }
@@ -1849,7 +1853,7 @@ struct objc_class : objc_object {
         }
     }
     
-    // 得到 demangledName，即重整前的名字
+    // 得到 demangledName，即取消重整后的名字
     // 如果传入的参数 realize 是 false，那么类必须已经被 realized 或者 future
     // 普通 OC 类，重整前后的名字是一样的，而 swift 类重整前后的名字不一样
     const char *demangledName(bool realize = false);

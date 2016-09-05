@@ -787,6 +787,9 @@ typedef struct {
     struct SyncCache *syncCache;  // for @synchronize
     struct alt_handler_list *handlerList;  // for exception alt handlers
     char *printableNames[4];  // temporary demangled names for logging
+                        // 数组，存储需要打印的类取消重整的名字，
+                        // 是一个 FIFO 的队列，有新的元素进来时，会将第一个元素释放，然后后面的元素向前挪一个单位，
+                        // 再把新来的元素放在末尾
 
     // If you add new fields here, don't forget to update 
     // _objc_pthread_destroyspecific()

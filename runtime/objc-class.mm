@@ -627,6 +627,7 @@ void _class_resolveMethod(Class cls, SEL sel, id inst)
 * class_getClassMethod.  Return the class method for the specified
 * class and selector.
 **********************************************************************/
+// 取得 cls 类的中 sel 对应的方法，注意是 Method(method_t) 类型，并不只是 IMP
 Method class_getClassMethod(Class cls, SEL sel)
 {
     if (!cls  ||  !sel) return nil;
