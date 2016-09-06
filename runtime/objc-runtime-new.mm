@@ -288,9 +288,12 @@ static void try_free(const void *p)
 }
 
 
-// 内部函数，为类开辟内存空间，即为 objc_class 对象开辟内存空间
-// 但是如果父类是 swift 类，就需要做特殊处理，因为子类需要继承父类的 extraBytes
-// supercls : 父类，如果是 nil，就当作 oc 类处理
+// 内部函数，创建一个新类，为新类开辟内存空间，即为一个新的 objc_class 对象开辟内存空间，
+// 必须注意的是，这个函数并没有使新类和 supercls 父类建立关系，只是用 supercls 来判断是否是 swift 类，并以此做一些处理，
+// 新类和父类是在 objc_initializeClassPair_internal() 函数中建立联系的
+// supercls : 父类，如果没有父类(cls==nil) 或者 父类不是 swift 类，就当作 oc 类处理，
+//            如果父类是 swift 类，就需要做特殊处理，因为 swift 类比 oc 类多一些东西，这些东西是需要继承的，
+//            且如果父类是 swift 类，则新类也必须标记为 swift 类
 // extraBytes : 额外的字节，这些字节可以用来存储除了类中定义之外的，额外的实例变量
 // 该函数被 objc_allocateClassPair() 和 objc_duplicateClass() 调用
 static Class 
@@ -7333,51 +7336,72 @@ look_up_class(const char *name,
 * fixme
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 复制类，用来实现 Foundation's Key-Value Observing，(我靠，竟然是传说中的 KVO，但是....有什么联系呢)
+// 不能复制元类，即 original 类不能是元类
 Class 
-objc_duplicateClass(Class original, const char *name, 
-                    size_t extraBytes)
+objc_duplicateClass(Class original,    // 被复制的类
+                    const char *name,  // 类的名字，即 duplicate 类和 original 类有不同的名字
+                    size_t extraBytes) // 额外的字节
 {
-    Class duplicate;
+    Class duplicate; // 副本类
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
-    assert(original->isRealized());
-    assert(!original->isMetaClass());
+    assert(original->isRealized());   // original 类必须是已经 realized 的
+    assert(!original->isMetaClass()); // original 类不能是元类
 
+    // 为 duplicate 类开辟内存空间
     duplicate = alloc_class_for_subclass(original, extraBytes);
 
-    duplicate->initClassIsa(original->ISA());
-    duplicate->superclass = original->superclass;
+    
+    duplicate->initClassIsa(original->ISA()); // 设置 duplicate 类的元类为 original 类的元类
+    duplicate->superclass = original->superclass; // 设置 duplicate 类的父类为 original 类的父类
+    duplicate->cache.initializeToEmpty(); // 初始化 duplicate 类的方法缓存
 
-    duplicate->cache.initializeToEmpty();
-
+    // 堆中新建一个 rw
     class_rw_t *rw = (class_rw_t *)calloc(sizeof(*original->data()), 1);
+    // 新 rw 中的 flag 也是从 original 类拷贝来的，但是 RW_COPIED_RO 和 RW_REALIZING 两个位置为 1
+    // 即表示 ro 是堆拷贝过来的(堆拷贝是在下面做的)，并且 duplicate 类还处于 realizing 状态，当然，函数末尾会清除 realizing 状态
     rw->flags = (original->data()->flags | RW_COPIED_RO | RW_REALIZING);
-    rw->version = original->data()->version;
-    rw->firstSubclass = nil;
-    rw->nextSiblingClass = nil;
+    rw->version = original->data()->version; // version 也与 original 类保持一致
+    rw->firstSubclass = nil; // 没有子类
+    rw->nextSiblingClass = nil; // 也没有兄弟类
 
-    duplicate->bits = original->bits;
-    duplicate->setData(rw);
+    duplicate->bits = original->bits; // bit 来拷贝自 original 类
+    duplicate->setData(rw); // 但是 bits 中的 rw 用上面新建的
 
+    // 堆拷贝 ro，同样是拷贝自 original 类
     rw->ro = (class_ro_t *)
         memdup(original->data()->ro, sizeof(*original->data()->ro));
+    
+    // 设置 ro 中记录的类的名字，即 duplicate 类和 original 类有不同的名字
+    // name 也是堆拷贝的
     *(char **)&rw->ro->name = strdup(name);
 
+    // 拷贝方法列表数组
     rw->methods = original->data()->methods.duplicate();
 
     // fixme dies when categories are added to the base
-    rw->properties = original->data()->properties;
-    rw->protocols = original->data()->protocols;
+    // 这句话的意思可能是，properties 和 protocols 都没有像上面的 methods 一样调用 duplicate()
+    // 这是建立在 original 类没有分类的前提下的，如果有分类添加了新的属性和协议，则数组里不只有一个列表，
+    // 那么，就会出现严重的错误
+    // 这是我猜的，可能事实不是如此，应该不是非常重要，所以不要太纠结
+    rw->properties = original->data()->properties; // 拷贝属性列表数组
+    rw->protocols = original->data()->protocols; // 拷贝协议列表数组
 
-    if (duplicate->superclass) {
+    if (duplicate->superclass) { // 如果有父类
+        // 则将 duplicate 添加为 父类 的子类，建立起和父类的关系
         addSubclass(duplicate->superclass, duplicate);
     }
 
     // Don't methodize class - construction above is correct
-
+    // 不必 methodize 这个类，因为上面添加方法、属性、协议的步骤相当于已经做了 methodizeClass() 函数的工作了
+    
+    // 将类添加到 gdb_objc_realized_classes 表中
     addNamedClass(duplicate, duplicate->data()->ro->name);
+    // 将类添加到 realized_class_hash 哈希表中
     addRealizedClass(duplicate);
+    
     // no: duplicate->ISA == original->ISA
     // addRealizedMetaclass(duplicate->ISA);
 
@@ -7387,6 +7411,7 @@ objc_duplicateClass(Class original, const char *name,
                      (void*)duplicate, duplicate->data()->ro);
     }
 
+    // 清除 realizing 状态，表示已经结束 realizing，现在是 realized 的了
     duplicate->clearInfo(RW_REALIZING);
 
     return duplicate;
@@ -7398,68 +7423,110 @@ objc_duplicateClass(Class original, const char *name,
 **********************************************************************/
 
 // &UnsetLayout is the default ivar layout during class construction
+// &UnsetLayout 是类 under construction 时默认的 ivarLayout 和 weakIvarLayout
+// UnsetLayout 还是个静态常量
 static const uint8_t UnsetLayout = 0;
 
-static void objc_initializeClassPair_internal(Class superclass, const char *name, Class cls, Class meta)
+// 静态的内部函数，用来初始化一对新的<类-元类>的信息，这一对<类-元类>可能是刚在 objc_allocateClassPair() 函数中创建的，
+// 但是只分配了内存，里面什么信息都没有，所以要在该函数中填充信息；
+// 调用者：objc_allocateClassPair() / objc_initializeClassPair()
+static void objc_initializeClassPair_internal(Class superclass, // 父类
+                                              const char *name, // 类名
+                                              Class cls,  // 新类
+                                              Class meta) // 新类的元类
 {
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // runtimeLock 需要事先加写锁
 
     class_ro_t *cls_ro_w, *meta_ro_w;
 
-    cls->cache.initializeToEmpty();
-    meta->cache.initializeToEmpty();
+    cls->cache.initializeToEmpty();  // 初始化 cls 类的方法缓存
+    meta->cache.initializeToEmpty(); // 初始化 meta 类的方法缓存
     
-    cls->setData((class_rw_t *)calloc(sizeof(class_rw_t), 1));
-    meta->setData((class_rw_t *)calloc(sizeof(class_rw_t), 1));
-    cls_ro_w   = (class_ro_t *)calloc(sizeof(class_ro_t), 1);
-    meta_ro_w  = (class_ro_t *)calloc(sizeof(class_ro_t), 1);
-    cls->data()->ro = cls_ro_w;
-    meta->data()->ro = meta_ro_w;
+    cls->setData((class_rw_t *)calloc(sizeof(class_rw_t), 1)); // 为 cls 类的 rw 分配内存
+    meta->setData((class_rw_t *)calloc(sizeof(class_rw_t), 1));// 为 meta 类的 rw 分配内存
+    cls_ro_w   = (class_ro_t *)calloc(sizeof(class_ro_t), 1);  // 为 cls 类的 ro 分配内存
+    meta_ro_w  = (class_ro_t *)calloc(sizeof(class_ro_t), 1);  // 为 meta 类的 ro 分配内存
+    cls->data()->ro = cls_ro_w;   // 设置 cls 类的 ro
+    meta->data()->ro = meta_ro_w; // 设置 meta 类的 ro
 
-    // Set basic info
+    // Set basic info  设置基本信息
 
+    // 设置 cls 和 meta 的 rw 中的 flags
+    // 二者的 flags 是一样
+    // RW_CONSTRUCTING: 类正在构造(under construction)，还没有注册
+    // RW_COPIED_RO: class_rw_t->ro 是 class_ro_t 堆拷贝过来的，这时的 ro 是可读可写的
+    // RW_REALIZED: 类已经被 realized
+    // RW_REALIZING: 类已经被 realizing，其实已经设置 RW_REALIZED，那么这个 flag 是没啥用的
     cls->data()->flags = RW_CONSTRUCTING | RW_COPIED_RO | RW_REALIZED | RW_REALIZING;
     meta->data()->flags = RW_CONSTRUCTING | RW_COPIED_RO | RW_REALIZED | RW_REALIZING;
+    
+    // 设置 rw 的 version，可以看到 普通实例类是 0，元类是 7，不知道有啥用
     cls->data()->version = 0;
     meta->data()->version = 7;
 
-    cls_ro_w->flags = 0;
-    meta_ro_w->flags = RO_META;
+    // 设置 cls 和 meta 的 ro 中的 flags
+    cls_ro_w->flags = 0; // cls 类的 ro 初始什么标记都没有
+    meta_ro_w->flags = RO_META; // meta 类的 ro 标记为是元类
+    
+    // 如果没有父类，则将 cls 和 meta 都标记为 根类
     if (!superclass) {
         cls_ro_w->flags |= RO_ROOT;
-        meta_ro_w->flags |= RO_ROOT;
+        meta_ro_w->flags |= RO_ROOT; // 照理说元类不是根类，即它还是有父类的，它的父类是 cls 类，这在下面也可以证实
+                                     // 所以这里的 RO_ROOT 对于元类的意思应该更多的是 根元类的 意思，而不是没有父类的意思
     }
-    if (superclass) {
+    
+    if (superclass) { // 如果有父类
+        // 则 IMPL 结构体中成员变量的起始偏移量等于父类的成员变量总大小，见 objc_runtime_new.h 中 TestNSObject 的例子
         cls_ro_w->instanceStart = superclass->unalignedInstanceSize();
         meta_ro_w->instanceStart = superclass->ISA()->unalignedInstanceSize();
+        
+        // 类中成员变量总大小就是起始偏移量，这个很尴尬啊....因为这时类中还没有自己的成员变量
         cls->setInstanceSize(cls_ro_w->instanceStart);
         meta->setInstanceSize(meta_ro_w->instanceStart);
-    } else {
+    }
+    else { // 如果没有父类
+        // 则 cls 类的 IMPL 结构体中成员变量的起始偏移量就是 0
         cls_ro_w->instanceStart = 0;
+        
+        // meta 类中的 IMPL 结构体中成员变量的起始偏移量 等于 sizeof(objc_class)
+        // 这又是为什么呢？？因为根元类也是有父类的，根元类的父类就是 cls 类，所以要减掉 sizeof(objc_class)
+        // 这在 objc_runtime_new.h 中 TestNSObject 的例子中也是可以看到的
         meta_ro_w->instanceStart = (uint32_t)sizeof(objc_class);
+        
+        // 根类的成员变量只有一个 isa
         cls->setInstanceSize((uint32_t)sizeof(id));  // just an isa
+        
+        // 根元类的总大小就是起始偏移量，因为自己没有成员变量
         meta->setInstanceSize(meta_ro_w->instanceStart);
     }
 
+    // 堆中拷贝类名
     cls_ro_w->name = strdup(name);
     meta_ro_w->name = strdup(name);
 
+    // 默认的 ivarLayout 和 weakIvarLayout 是 &UnsetLayout，即指向的是 0，
+    // 感觉好像跟指向 null 差不多
     cls_ro_w->ivarLayout = &UnsetLayout;
     cls_ro_w->weakIvarLayout = &UnsetLayout;
 
     // Connect to superclasses and metaclasses
-    cls->initClassIsa(meta);
-    if (superclass) {
-        meta->initClassIsa(superclass->ISA()->ISA());
-        cls->superclass = superclass;
-        meta->superclass = superclass->ISA();
-        addSubclass(superclass, cls);
-        addSubclass(superclass->ISA(), meta);
-    } else {
-        meta->initClassIsa(meta);
-        cls->superclass = Nil;
-        meta->superclass = cls;
-        addSubclass(cls, meta);
+    cls->initClassIsa(meta); // 设置 cls 类的 isa 为 meta 类，即设置 cls 的元类为 meta 类
+
+    // 下面是与父类，以及父类的元类建立联系，如果看不懂的话，就配合配图中的 class-diagram.jpg 看
+    
+    if (superclass) { // 如果有父类
+        meta->initClassIsa(superclass->ISA()->ISA()); // 则 meta 类的 isa 是父类的元类的 isa
+                                                      // 比较绕，其实就是指向根元类，任何元类的 isa 都是根元类，包括根元类自己
+        cls->superclass = superclass; // cls 类的父类就是 superclass 类
+        meta->superclass = superclass->ISA(); // meta 类的父类就是 superclass 类的元类
+        addSubclass(superclass, cls); // 将 cls 添加为 superclass 类的子类，这样 cls 就进入了继承树
+        addSubclass(superclass->ISA(), meta); // 将 meta 类添加为 superclass 类元类的子类
+        
+    } else { // 如果没有父类
+        meta->initClassIsa(meta); // meta 类就是根元类，根元类的 isa 指向自己
+        cls->superclass = Nil; // cls 类是根类，根类的父类指针指向 nil
+        meta->superclass = cls; // meta 类的父类是 cls 类
+        addSubclass(cls, meta); // 将 meta 类添加为 cls 类的子类
     }
 }
 
@@ -7492,6 +7559,7 @@ verifySuperclass(Class superclass, bool rootOK)
 /***********************************************************************
 * objc_initializeClassPair
 **********************************************************************/
+// 调用者：无
 Class objc_initializeClassPair(Class superclass, const char *name, Class cls, Class meta)
 {
     rwlock_writer_t lock(runtimeLock);
@@ -7513,6 +7581,7 @@ Class objc_initializeClassPair(Class superclass, const char *name, Class cls, Cl
 * fixme
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 调用者：_NSResurrectedObject_initialize()
 Class objc_allocateClassPair(Class superclass, const char *name, 
                              size_t extraBytes)
 {

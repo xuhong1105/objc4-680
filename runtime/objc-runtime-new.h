@@ -608,7 +608,8 @@ struct locstamped_category_list_t {
 #define RW_COPIED_RO          (1<<27)  // class_rw_t->ro 是 class_ro_t 堆拷贝过来的
                                        // 即先在堆中分配内存，然后将 ro 拷贝过去，这时的 ro 就是可读可写的
 // class allocated but not yet registered
-#define RW_CONSTRUCTING       (1<<26)  // 类已经被 allocated，但是没有注册
+#define RW_CONSTRUCTING       (1<<26)  // 类已经被 allocated，但是没有注册，
+                                       // 一般称为 under construction 或者 in construction
 // class allocated and registered
 #define RW_CONSTRUCTED        (1<<25)  // 类已经 allocated，并且已经注册
 // GC:  class has unsafe finalize method
@@ -678,7 +679,7 @@ struct locstamped_category_list_t {
 // class's instances requires raw isa
 #define FAST_REQUIRES_RAW_ISA   (1UL<<2)  // 当前类的实例需要 raw isa
 // data pointer
-#define FAST_DATA_MASK          0x00007ffffffffff8UL // 存 class_rw_t 结构体的位置
+#define FAST_DATA_MASK          0x00007ffffffffff8UL // 存 rw 的地址的位置
 
 #else    // 靠，上面是 #elif 1 ，这个 #else 会走 ？？？？
 
@@ -926,7 +927,7 @@ static struct _class_ro_t _OBJC_METACLASS_RO_$_AXPerson __attribute__ ((used, se
  // AXPerson 类的 ro
 static struct _class_ro_t _OBJC_CLASS_RO_$_AXPerson __attribute__ ((used, section ("__DATA,__objc_const"))) = {
     0,         // flags
-    __OFFSETOFIVAR__(struct AXPerson, _name), // instanceStart  成员变量 _name 开始的位置
+    __OFFSETOFIVAR__(struct AXPerson, _name), // instanceStart  成员变量 _name 开始的偏移量
     sizeof(struct AXPerson_IMPL),  // instanceSize  成员变量的总大小
     (unsigned int)0,    // reserved
     0,                  // ivarLayout
@@ -952,16 +953,17 @@ static struct _class_ro_t _OBJC_CLASS_RO_$_AXPerson __attribute__ ((used, sectio
 // RO 就是 Read Only
 struct class_ro_t {
     uint32_t flags; // 利用 bit 位存了很多信息，其中包括是否是元类等
-    uint32_t instanceStart; // 结构体中实例变量开始的地址
-    uint32_t instanceSize;  // 实例变量的大小
+    uint32_t instanceStart; // IMPL 结构体中，属于该类的实例变量的起始位置，即起始偏移量（前面是父类的实例变量）
+    uint32_t instanceSize;  // 实例变量的总大小
 #ifdef __LP64__
     uint32_t reserved;  // 64 位系统下，才有这个字段。 保留字段... 不用深究
 #endif
 
     const uint8_t * ivarLayout; // 记录了哪些是 strong 的 ivar，
-                                // 也有可能是 
+                                // 也可能是一个存取器函数指针 见_class_setIvarLayoutAccessor()
     
     const char * name;   // 从上面的实例看，应该是类本身的名字
+                         // 堆中分配
     
     method_list_t * baseMethodList;  // 基本方法列表，存储编译期确定的方法
     protocol_list_t * baseProtocols; // 基本协议列表，存储编译期确定的协议
@@ -1223,6 +1225,7 @@ class method_array_t :
     // 取得分类方法列表的尾部，如果没有 base methods ，则尾部就是 array 的尾部，否则就是尾部的前一个元素
     method_list_t **endCategoryMethodLists(Class cls);
 
+    // 拷贝方法数组
     method_array_t duplicate() {
         return Super::duplicate<method_array_t>();
     }
@@ -1260,7 +1263,7 @@ struct class_rw_t {
     
     uint32_t flags; // 存了是否有 C++ 构造器、C++ 析构器、默认 RR 等信息
     
-    uint32_t version; // 版本，元类是 7，普通类是 0
+    uint32_t version; // 版本，元类是 7，普通类是 0，见 objc_initializeClassPair_internal()
 
     const class_ro_t *ro; // 指向 ro 的指针，ro 中存储了当前类在编译期就已经确定的属性、方法以及遵循的协议
                           // 成员变量也在其中
@@ -1318,9 +1321,9 @@ struct class_rw_t {
 struct class_data_bits_t {
 
     // Values are the FAST_ flags above.
-    uintptr_t bits; // 只有这个一个成员变量，所有数据都存在这里
-                    // 1. 在 realized 之前，bits 存的是 class_ro_t，
-                    // 2. realized 后，bits 存 class_rw_t ，class_rw_t 里的 ro 变量存 class_ro_t
+    uintptr_t bits; // 只有这个一个成员变量，所有数据都存在这里，包括 rw 的地址和一些 flag
+                    // 1. 在 realized 之前，bits 存的是 ro 的地址，
+                    // 2. realized 后，bits 存 rw 的地址，rw 里的存有 ro 的地址
 private:
     // 取得指定 bit 处的数据
     bool getBit(uintptr_t bit)
@@ -1396,7 +1399,7 @@ public:
         // Set during realization or construction only. No locking needed.
         
         // 1. bits & ~FAST_DATA_MASK 先将存 class_rw_t 的位置上的那些 bit 置为 0
-        // 2. 然后 | (uintptr_t)newData ，将刚才置 0 的那些位用 newData 填充
+        // 2. 然后 | (uintptr_t)newData ，将刚才置 0 的那些位用 newData 的地址填充
         bits = (bits & ~FAST_DATA_MASK) | (uintptr_t)newData;
     }
 
@@ -1617,7 +1620,8 @@ struct objc_class : objc_object {
                     // 元类（也就是类的类型）被存在了 objc_object 中的 isa_t isa 结构体中
     Class superclass; // 指向当前类的父类
     cache_t cache;    // cache 缓存 sel 和 imp 的对应关系，加速方法的调用  // formerly cache pointer and vtable
-    class_data_bits_t bits;  // 存储类的方法、属性、遵循的协议等信息  // class_rw_t * plus custom rr/alloc flags
+    class_data_bits_t bits; // class_rw_t * plus custom rr/alloc flags
+                        // 存储类的方法、属性、遵循的协议等信息，注意是值类型的
                         // objc_class 中对 class_data_bits_t 中的很多方法重新做了封装
                         // 对外界隐藏了 class_data_bits_t
 

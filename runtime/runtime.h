@@ -863,6 +863,17 @@ OBJC_EXPORT void *objc_destructInstance(id obj)
  * @note Instance methods and instance variables should be added to the class itself. 
  *  Class methods should be added to the metaclass.
  */
+// 创建一对新的类和元类
+// superclass 是新类的父类，如果没有父类，则创建的是新的根类
+// name 是新类的名字，会被堆拷贝
+// extraBytes 是额外的字节，通常是 0
+// 返回新类，如果创建失败，就返回 nil，比如类名已经被使用了
+// 提示：I 可以通过 object_getClass(newClass) 取得新建的元类
+//     II 创建一个新类的步骤：
+//         1. 调用 objc_allocateClassPair() 函数创建类-元类对
+//         2. 调用 class_addMethod() / class_addIvar() 等函数 设置类的 attributes
+//         3. 完成构建，就调用 objc_registerClassPair() 函数注册类-元类对，然后这个类就可以使用了
+//    III 实例方法和实例变量被添加到类中，类方法被添加到元类中
 OBJC_EXPORT Class objc_allocateClassPair(Class superclass, const char *name, 
                                          size_t extraBytes) 
      __OSX_AVAILABLE_STARTING(__MAC_10_5, __IPHONE_2_0);
@@ -1538,6 +1549,7 @@ typedef OBJC_ENUM(uintptr_t, objc_AssociationPolicy) {
  * @see objc_setAssociatedObject
  * @see objc_removeAssociatedObjects
  */
+// 函数的实现在 objc-runtime.mm
 OBJC_EXPORT void objc_setAssociatedObject(id object, const void *key, id value, objc_AssociationPolicy policy)
     __OSX_AVAILABLE_STARTING(__MAC_10_6, __IPHONE_3_1);
 

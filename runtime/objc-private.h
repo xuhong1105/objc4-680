@@ -80,7 +80,7 @@ union isa_t
     
 #if SUPPORT_NONPOINTER_ISA
 
-    // extra_rc must be the MSB-most field (so it matches carry/overflow flags)
+    // extra_rc must be the MSB-most(最高有效位) field (so it matches carry/overflow flags)
     // indexed must be the LSB (fixme or get rid of it)
     // shiftcls must occupy the same bits that a real class pointer would
     // bits + RC_ONE is equivalent to extra_rc + 1
@@ -102,7 +102,8 @@ union isa_t
 # if __arm64__
 #   define ISA_MASK        0x0000000ffffffff8ULL
 #   define ISA_MAGIC_MASK  0x000003f000000001ULL
-#   define ISA_MAGIC_VALUE 0x000001a000000001ULL
+#   define ISA_MAGIC_VALUE 0x000001a000000001ULL // 初始化的 bits 值，其中 magic 初始化为 011010
+                                                 // indexed 被初始化为 1，其他位均被初始化为 0
     struct {
         uintptr_t indexed           : 1; // 0表示普通的isa指针 1表示优化过的，存储引用计数
         uintptr_t has_assoc         : 1; // 对象是否包含 associated object，如果没有，析构时会更快

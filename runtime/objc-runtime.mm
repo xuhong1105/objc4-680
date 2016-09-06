@@ -624,7 +624,7 @@ void objc_setAssociatedObject_non_gc(id object, const void *key, id value, objc_
 }
 
 
-#if SUPPORT_GC
+#if SUPPORT_GC // GC 的，不用管它们
 
 id objc_getAssociatedObject_gc(id object, const void *key) {
     // auto_zone doesn't handle tagged pointer objects. Track it ourselves.
@@ -646,7 +646,9 @@ void objc_setAssociatedObject_gc(id object, const void *key, id value, objc_Asso
 // objc_setAssociatedObject and objc_getAssociatedObject are 
 // resolver functions in objc-auto.mm.
 
-#else
+#else // 非 GC
+
+// 关联对象相关的的三个函数，一定要看
 
 id 
 objc_getAssociatedObject(id object, const void *key) 

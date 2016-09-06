@@ -112,62 +112,76 @@ objc_object::getIsa()
     return ISA(); // 否则直接返回 isa_t isa 中存的 cls
 }
 
-
+// 初始化对象的 isa 为 cls
 inline void 
 objc_object::initIsa(Class cls)
 {
     initIsa(cls, false, false);
 }
 
+// 初始化类的 isa 为 cls，即设置元类
 inline void 
 objc_object::initClassIsa(Class cls)
 {
     // disable non-pointer isa fields
     if (DisableIndexedIsa) { // 是否禁止了 non-pointer isa
                              // DisableIndexedIsa 是在 _read_images 中被赋值的
-        initIsa(cls, false, false);
+        initIsa(cls, false/*不支持non-pointer isa*/, false);
     } else {
-        initIsa(cls, true, false);
+        initIsa(cls, true/*支持non-pointer isa*/, false);
     }
 }
 
+// 初始化协议的 isa 为 cls
 inline void
 objc_object::initProtocolIsa(Class cls)
 {
     return initClassIsa(cls);
 }
 
+// 初始化实例的 isa
 inline void 
 objc_object::initInstanceIsa(Class cls, bool hasCxxDtor)
 {
-    assert(!UseGC);
-    // 如果需要 raw isa ，就玩不下去了
-    assert(!cls->requiresRawIsa());
-    assert(hasCxxDtor == cls->hasCxxDtor());
+    assert(!UseGC); // 不能使用 GC
+    assert(!cls->requiresRawIsa()); // 不能使用 raw isa
+    assert(hasCxxDtor == cls->hasCxxDtor()); // 是否有 c++ 析构器必须与 cls 保持一致
 
     initIsa(cls, true, hasCxxDtor);
 }
 
-// 初始化 cls 类的 isa
+// 初始化对象的 isa 为 cls
 // indexed : 是否支持 non-pointer isa，non-pointer 的 isa 会在 isa 中存一些其他的信息
 // hasCxxDtor : 是否有c++的析构函数
 inline void 
-objc_object::initIsa(Class cls, bool indexed, bool hasCxxDtor)
+objc_object::initIsa(Class cls, bool indexed/*是否支持 non-pointer isa */,
+                     bool hasCxxDtor)
 { 
     assert(!isTaggedPointer()); 
     
-    if (!indexed) {
+    if (!indexed) { // 如果不支持 non-pointer isa，则 isa 中只有 cls
         isa.cls = cls;
     } else {
         // 如果用 non-pointer isa fields
         // 就会在其中存其他的东西
         assert(!DisableIndexedIsa);
-        isa.bits = ISA_MAGIC_VALUE;
+        
+        isa.bits = ISA_MAGIC_VALUE; // 初始化 bits 的值
+        
         // isa.magic is part of ISA_MAGIC_VALUE
         // isa.indexed is part of ISA_MAGIC_VALUE
-        isa.has_cxx_dtor = hasCxxDtor;
-        // 为什么是右移3位？？？
-        isa.shiftcls = (uintptr_t)cls >> 3;
+        // 这句话的意思是，isa.magic 和 isa.indexed 的初始化都已经被包括在 ISA_MAGIC_VALUE 了
+        // 看 ISA_MAGIC_VALUE 的值，确实是如此的
+        
+        isa.has_cxx_dtor = hasCxxDtor; // 设置本对象是否有 c++ 析构器
+        
+        isa.shiftcls = (uintptr_t)cls >> 3; // shiftcls 存 cls
+                    /* 右移3位可能是因为，低三位一直是零，截掉也没事，
+                        然后还可以防止 shiftcls 里放不下
+                        这个解释感觉有点牵强啊....
+                        不过从 shiftcls 中取 cls 的时候会左移三位，这样就对应了，见 objc_object::changeIsa()
+                        其他地方倒是没有与这右移三位有关系的代码，所以应该没什么玄奥的目的，不要太纠结
+                    */
     }
 }
 
