@@ -318,7 +318,7 @@ struct entsize_list_tt {
 // 方法结构体
 struct method_t {
     SEL name;          // 方法名，就是 SEL
-    const char *types; // 方法类型，有的地方又称 method signature 方法签名
+    const char *types; // 方法类型字符串，有的地方又称 method signature 方法签名
     IMP imp;           // 指向方法的函数实现的指针
     
     /* 
@@ -348,6 +348,12 @@ struct ivar_t {
     // little-endian values.
     // Some code uses all 64 bits. class_addIvar() over-allocates the 
     // offset for their benefit.
+/*
+    *offset 在一些 x86_64 平台上最初是占 64 位的。见 class_addIvar()
+    我们只用其中的 32 位。
+    一些元数据提供所有的 64 位。这对无符号低字节序的值是无害的。
+    一些代码用 64 位，class_addIvar() 重新在堆中开辟了这个 offset，见 class_addIvar()
+*/
 #endif
     int32_t *offset; // 偏移量 用 __OFFSETOFIVAR__ 计算
     const char *name; // 成员变量名  比如 "_name"
@@ -381,6 +387,7 @@ struct property_t {
 // Two bits of entsize are used for fixup markers.
 // 方法列表，是一个容器，继承自 entsize_list_tt，
 // 元素类型是 method_t ，容器类型是 method_list_t
+// 该列表是值类型的
 struct method_list_t : entsize_list_tt<method_t, method_list_t, 0x3> { // 0x3 就是 0b11
                                                                        // 即 flag 占 2 个 bit，用来放 fixedup markers
     
@@ -398,11 +405,13 @@ struct method_list_t : entsize_list_tt<method_t, method_list_t, 0x3> { // 0x3 �
 
 #pragma mark - ivar_list_t & property_list_t
 
-// 成员变量列表
+// 成员变量列表，
+// 该列表是值类型的
 struct ivar_list_t : entsize_list_tt<ivar_t, ivar_list_t, 0> { // flag 占 0 个 bit
 };
 
 // 属性列表
+// 该列表是值类型的
 struct property_list_t : entsize_list_tt<property_t, property_list_t, 0> { // flag 占 0 个 bit
 };
 
@@ -481,8 +490,8 @@ struct protocol_t : objc_object {
 
 // 协议列表，注意，协议列表和 method_list_t 等不一样，没继承 entsize_list_tt
 // 我猜，可能是跟协议列表里存的变量类型有关系
-// protocol_ref_t list[0]; 数组里存的是协议的地址，即指针，而不是协议本身
-// 这与 entsize_list_tt 不一样，entsize_list_tt 中直接存了 Element first; 元素本身
+// protocol_ref_t list[0]; 数组里存的是协议的地址，即指针，而不是协议本身，既不是值类型的
+// 这与 entsize_list_tt 不一样，entsize_list_tt 中直接存了 Element first; 元素本身，是值类型的
 // 比如 method_list_t，继承自 entsize_list_tt，里面的元素就是 method_t，而不是 method_t *
 
 struct protocol_list_t {
@@ -1258,7 +1267,7 @@ struct class_rw_t {
 
     method_array_t methods;  // 方法列表数组，每个元素是一个指针，指向一个方法列表 method_list_t，
                              // 前面是分类方法列表，一个分类一个列表，base methods list放在最后
-    property_array_t properties; // 属性列表数组
+    property_array_t properties; // 属性列表数组，
     protocol_array_t protocols;  // 协议列表数组
 
     Class firstSubclass;    // 第一个子类
@@ -1862,14 +1871,14 @@ struct objc_class : objc_object {
     const char *nameForLogging();
 
     // May be unaligned depending on class's ivars.
-    // 没有对齐的实例变量（成员变量）的大小
+    // 没有对齐的成员变量的总大小
     uint32_t unalignedInstanceSize() {
         assert(isRealized());
         return data()->ro->instanceSize;
     }
 
     // Class's ivar size rounded up to a pointer-size boundary.
-    // 对齐后的实例变量（成员变量）的大小
+    // 对齐后的成员变量的大小
     uint32_t alignedInstanceSize() {
         return word_align(unalignedInstanceSize());
     }
@@ -1882,7 +1891,7 @@ struct objc_class : objc_object {
         return size;
     }
 
-    // 设置成员变量的新的大小
+    // 设置成员变量的新的总大小
     void setInstanceSize(uint32_t newSize) {
         assert(isRealized());
         // 1. data()->ro->instanceSize 需要保持一致，但是只有与旧值不一样，才更改

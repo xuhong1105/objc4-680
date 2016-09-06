@@ -624,6 +624,7 @@ static bool isBundleClass(Class cls)
 }
 
 // fixup 指定的方法列表
+// fixup 其实就干了三件事：1.注册 sel；2.排查需要被忽略的方法；3.将列表中的方法按照 sel 字符串的地址排序；
 // bundleCopy : 是否从 bundle 中拷贝
 // sort : 是否排序，排序是按照比较 method_t->name 进行的，SEL 字符串地址小的放前面
 // 被 prepareMethodLists() 和 fixupProtocolMethodList() 函数调用
@@ -856,7 +857,7 @@ static void methodizeClass(Class cls)
     // them already. These apply before category replacements.
     if (cls->isRootMetaclass()) { // 如果是根元类
         // root metaclass
-        // 给根元类的 SEL_initialize 指定了对应的 IMP objc_noop_imp
+        // 给根元类的 SEL_initialize 指定了对应的 IMP - objc_noop_imp
         // 即给根元类发送 SEL_initialize 消息，不会走到它的 +initialize，而是走 objc_noop_imp，里面啥也不干
         addMethod(cls, SEL_initialize, (IMP)&objc_noop_imp, "", NO);
     }
@@ -6989,67 +6990,97 @@ BOOL class_conformsToProtocol(Class cls, Protocol *proto_gen)
 * fixme
 * Locking: runtimeLock must be held by the caller
 **********************************************************************/
+// 添加一个方法到 cls 类中，只涉及 cls 类，不涉及父类，
+// replace 指定了如果已经存在同名的方法的情况下，是否替换老方法的 IMP，
+// 返回值是同名老方法的 IMP，
+// 如果原来没有同名的老方法，则将新方法单独存入一个新的方法列表中，再将这个方法列表插入 cls 类的 methods 方法列表数组中，
+// 调用者：class_addMethod() / class_replaceMethod() / methodizeClass()
 static IMP 
-addMethod(Class cls, SEL name, IMP imp, const char *types, bool replace)
+addMethod(Class cls, SEL name, IMP imp, const char *types/*方法类型、方法签名*/,
+          bool replace/*如果已经存在同名的方法，是否替换*/)
 {
     IMP result = nil;
 
-    runtimeLock.assertWriting();
+    runtimeLock.assertWriting(); // 必须事先加写锁
 
-    assert(types);
-    assert(cls->isRealized());
+    assert(types); // 方法类型字符串不能为 nil，可以是 ""
+    assert(cls->isRealized()); // cls 必须是 realize 过的
 
     method_t *m;
-    if ((m = getMethodNoSuper_nolock(cls, name))) {
+    if ((m = getMethodNoSuper_nolock(cls, name))) { // 如果类中是否已经有同名的方法
         // already exists
-        if (!replace) {
-            result = m->imp;
-        } else {
-            result = _method_setImplementation(cls, m, imp);
+        if (!replace) { // 指定了不替换 imp
+            result = m->imp; // result 保存老的 imp
+        }
+        else {  // 指定替换老方法的 imp
+            result = _method_setImplementation(cls, m, imp); // result 保存老的 imp
         }
     } else {
+        // 如果原来没有同名的老方法，则将新方法单独存入一个新的方法列表中，再将这个方法列表插入 cls 类的 methods 方法列表数组中
+        
         // fixme optimize
-        method_list_t *newlist;
+        method_list_t *newlist; // 新的方法列表
+        // 为新的方法列表开辟一个单位的内存，只够放一个指针
         newlist = (method_list_t *)calloc(sizeof(*newlist), 1);
-        newlist->entsizeAndFlags = 
+        
+        // 方法列表中元素的大小，和 flag，标记该方法列表已经是经过 fixed-up 了，
+        // fixup 的工作会在底下调用的 prepareMethodLists() 函数中做
+        newlist->entsizeAndFlags =
             (uint32_t)sizeof(method_t) | fixed_up_method_list;
-        newlist->count = 1;
-        newlist->first.name = name;
-        newlist->first.types = strdup(types);
-        if (!ignoreSelector(name)) {
-            newlist->first.imp = imp;
+        
+        newlist->count = 1; // 方法列表中只有一个元素
+        newlist->first.name = name; // 第一个方法的 name
+        newlist->first.types = strdup(types); // 在堆中拷贝方法类型字符串，赋值给第一个元素的 types
+        if (!ignoreSelector(name)) { // 如果该方法不需要被忽略
+            newlist->first.imp = imp; // 就正常保存 imp
         } else {
+            // 如果该方法需要被忽略，就将其 IMP 设为 _objc_ignored_method 函数的地址
             newlist->first.imp = (IMP)&_objc_ignored_method;
         }
 
+        // prepare 新的方法列表，主要工作是方法列表 fixup 了，然后检查是否有自定义 AWZ/RR
         prepareMethodLists(cls, &newlist, 1, NO, NO);
+        
+        // 将新的方法列表插入到 cls 类的 methods 方法列表数组中
         cls->data()->methods.attachLists(&newlist, 1);
-        flushCaches(cls);
+        
+        flushCaches(cls); // 清空 cls 类的方法缓存
 
-        result = nil;
+        result = nil; // 没有老的方法，所以 result 为 nil
     }
 
     return result;
 }
 
 
+// 添加一个新方法到 cls 类中，只涉及 cls 类，不涉及父类，
+// 如果原来有同名的老方法，则不替换，添加失败
+// 返回值是是否添加成功
 BOOL 
 class_addMethod(Class cls, SEL name, IMP imp, const char *types)
 {
-    if (!cls) return NO;
+    if (!cls) return NO; // cls 为nil，没法儿玩，返回 NO，添加失败
 
-    rwlock_writer_t lock(runtimeLock);
-    return ! addMethod(cls, name, imp, types ?: "", NO);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
+    
+    // 如果有同名的老方法，则 addMethod() 会返回老方法的 IMP，否则返回 nil
+    // 返回 nil 的时候就代表成功了
+    return ! addMethod(cls, name, imp, types ?: ""/*没有types，则默认为空字符串*/, NO/*不替换老方法*/);
 }
 
 
+// 替换 cls 类中的指定方法，只涉及 cls 类，不涉及父类，
+// 如果原来有同名的老方法，则替换其 IMP，否则直接添加进 cls 类
+// 返回值是同名老方法 IMP，没有同名老方法的话，就返回 nil
 IMP 
 class_replaceMethod(Class cls, SEL name, IMP imp, const char *types)
 {
-    if (!cls) return nil;
+    if (!cls) return nil; // cls 为nil，没法儿玩，直接返回 nil
 
-    rwlock_writer_t lock(runtimeLock);
-    return addMethod(cls, name, imp, types ?: "", YES);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
+    
+    // 调用 addMethod 进行替换
+    return addMethod(cls, name, imp, types ?: ""/*没有types，则默认为空字符串*/, YES/*替换老方法*/);
 }
 
 
@@ -7058,25 +7089,33 @@ class_replaceMethod(Class cls, SEL name, IMP imp, const char *types)
 * Adds an ivar to a class.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 添加一个成员变量到 cls 类中，
+// 如果已经有同名的成员变量存在，则添加失败,
+// 可以添加匿名成员变量，匿名成员变量的 name 为 nil，
+// cls 不能是元类，而且必须是 under construction 的，
+// size 不能超过 UINT32_MAX，太大的成员变量是不允许添加的，
+// 返回值是是否添加成功
 BOOL 
-class_addIvar(Class cls, const char *name, size_t size, 
-              uint8_t alignment, const char *type)
+class_addIvar(Class cls, const char *name/*变量名*/, size_t size/*变量的大小*/,
+              uint8_t alignment/*按多少字节对其*/, const char *type/*类型字符串 比如"@\"NSString\""*/)
 {
-    if (!cls) return NO;
+    if (!cls) return NO; // cls 必须不是 nil
 
-    if (!type) type = "";
-    if (name  &&  0 == strcmp(name, "")) name = nil;
+    if (!type) type = ""; // 如果没有 type，则用 "" 代替
+    
+    if (name  &&  0 == strcmp(name, "")) name = nil; // 如果 name 为 ""，则用 nil 代替
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // cls 必须是 realize 过的
 
     // No class variables
-    if (cls->isMetaClass()) {
+    if (cls->isMetaClass()) { // 不能向元类添加成员变量
         return NO;
     }
 
     // Can only add ivars to in-construction classes.
+    // cls 必须是 under construction 的
     if (!(cls->data()->flags & RW_CONSTRUCTING)) {
         return NO;
     }
@@ -7084,30 +7123,48 @@ class_addIvar(Class cls, const char *name, size_t size,
     // Check for existing ivar with this name, unless it's anonymous.
     // Check for too-big ivar.
     // fixme check for superclass ivar too?
+    // 检查 2 项：
+    //    1. 如果 name 不为 nil，即它不是一个匿名成员变量，则不能存在同名的成员变量；
+    //    2. 成员变量的大小不能超过 UINT32_MAX，太大的成员变量是不允许添加的；
     if ((name  &&  getIvar(cls, name))  ||  size > UINT32_MAX) {
         return NO;
     }
 
+    // 重新为 rw->ro 在堆中分配空间，使其可写
     class_ro_t *ro_w = make_ro_writeable(cls->data());
 
     // fixme allocate less memory here
     
     ivar_list_t *oldlist, *newlist;
+    
+    // 如果存在老的成员变量列表
     if ((oldlist = (ivar_list_t *)cls->data()->ro->ivars)) {
+        // 老列表的总大小
         size_t oldsize = oldlist->byteSize();
+        // 为新变量列表开辟一块更大的内存，比原来多一个元素的大小，并清零
         newlist = (ivar_list_t *)calloc(oldsize + oldlist->entsize(), 1);
+        // 将老列表中的数据全部拷贝到新列表中
         memcpy(newlist, oldlist, oldsize);
-        free(oldlist);
-    } else {
+        free(oldlist); // 将老列表释放
+    } else { // 如果不存在老的列表
+        // 新建一个列表，并清零
         newlist = (ivar_list_t *)calloc(sizeof(ivar_list_t), 1);
+        // 新列表中元素的大小
         newlist->entsizeAndFlags = (uint32_t)sizeof(ivar_t);
     }
 
+    // 没有对齐的成员变量的总大小
     uint32_t offset = cls->unalignedInstanceSize();
     uint32_t alignMask = (1<<alignment)-1;
+    // 计算出新的成员变量的偏移量
     offset = (offset + alignMask) & ~alignMask;
 
+    // 取得新列表的最后一个元素，因为成员变量列表是值类型的，所以可以直接这样取
     ivar_t& ivar = newlist->get(newlist->count++);
+    
+    // ivar.offset 是指针类型的，为其在堆中开辟内存，并将 offset 指向它
+    // __x86_64__ 用 calloc 开辟 64 bits，并清零，原因见 ivar_t
+    // 其他的平台用 malloc 开辟 32 bits
 #if __x86_64__
     // Deliberately over-allocate the ivar offset variable. 
     // Use calloc() to clear all 64 bits. See the note in struct ivar_t.
@@ -7115,15 +7172,16 @@ class_addIvar(Class cls, const char *name, size_t size,
 #else
     ivar.offset = (int32_t *)malloc(sizeof(int32_t));
 #endif
-    *ivar.offset = offset;
-    ivar.name = name ? strdup(name) : nil;
-    ivar.type = strdup(type);
-    ivar.alignment_raw = alignment;
-    ivar.size = (uint32_t)size;
+    
+    *ivar.offset = offset; // 偏移量赋值，因为它是指针类型的，所以需要用 *
+    ivar.name = name ? strdup(name) : nil; // 在堆中深拷贝 name 字符串
+    ivar.type = strdup(type); // 在堆中深拷贝 type 字符串
+    ivar.alignment_raw = alignment; // 对齐字节数
+    ivar.size = (uint32_t)size; // 变量的大小
 
-    ro_w->ivars = newlist;
-    cls->setInstanceSize((uint32_t)(offset + size));
-
+    ro_w->ivars = newlist; // ro->ivars 指向新的列表
+    cls->setInstanceSize((uint32_t)(offset + size)); // 设置成员变量的新的总大小
+ 
     // Ivar layout updated in registerClass.
 
     return YES;
@@ -7135,23 +7193,29 @@ class_addIvar(Class cls, const char *name, size_t size,
 * Adds a protocol to a class.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 添加一个协议到 cls 中，
+// 返回值是是否添加成功，如果 cls 类原来已经遵守同名的协议，则添加失败
+// 新的协议会被单独装进一个新的协议列表，并将列表插入 cls 类的 protocols 协议列表数组中
 BOOL class_addProtocol(Class cls, Protocol *protocol_gen)
 {
     protocol_t *protocol = newprotocol(protocol_gen);
 
-    if (!cls) return NO;
-    if (class_conformsToProtocol(cls, protocol_gen)) return NO;
+    if (!cls) return NO; // cls 必须非空
+    
+    if (class_conformsToProtocol(cls, protocol_gen)) return NO; // 如果 cls 类原来已经遵守同名的协议，则添加失败
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
-    assert(cls->isRealized());
+    assert(cls->isRealized()); // cls 必须已经被 realized
     
     // fixme optimize
+    // 开辟一个新的列表，大小只够放一个元素，用来放新协议，
     protocol_list_t *protolist = (protocol_list_t *)
         malloc(sizeof(protocol_list_t) + sizeof(protocol_t *));
-    protolist->count = 1;
-    protolist->list[0] = (protocol_ref_t)protocol;
+    protolist->count = 1; // 列表中只有一个元素
+    protolist->list[0] = (protocol_ref_t)protocol; // 将新协议放入列表中
 
+    // 将列表插入 cls 类的 protocols 协议列表数组
     cls->data()->protocols.attachLists(&protolist, 1);
 
     // fixme metaclass?
@@ -7165,56 +7229,72 @@ BOOL class_addProtocol(Class cls, Protocol *protocol_gen)
 * Adds a property to a class.
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 添加一个属性到 cls 类中，
+// 返回是是否添加成功，如果已存在同名的属性，且指定不进行替换，则添加失败，
+// 如果没有同名的属性，则新属性会被单独装进一个属性列表中，并将列表插入 cls 类的 properties 属性列表数组中
+// 调用者：class_addProperty() / class_replaceProperty()
 static bool 
-_class_addProperty(Class cls, const char *name, 
-                   const objc_property_attribute_t *attrs, unsigned int count, 
-                   bool replace)
+_class_addProperty(Class cls, // 类名，不能为 nil
+                   const char *name, // 属性名，不能为 nil
+                   const objc_property_attribute_t *attrs, // 属性的特性列表
+                   unsigned int count, // 特性列表中特性的数目
+                   bool replace) // 如果存在同名的属性，是否进行替换
 {
+    // cls 和 name 不能为 nil
     if (!cls) return NO;
     if (!name) return NO;
 
-    property_t *prop = class_getProperty(cls, name);
-    if (prop  &&  !replace) {
+    property_t *prop = class_getProperty(cls, name); // 查看 cls 类是否有同名的属性
+    if (prop  &&  !replace) { // 如果存在同名的属性，且指定不进行替换，则添加失败，返回 NO
         // already exists, refuse to replace
         return NO;
     } 
-    else if (prop) {
+    else if (prop) { // 如果存在同名的属性，但是指定进行替换
         // replace existing
-        rwlock_writer_t lock(runtimeLock);
-        try_free(prop->attributes);
+        rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
+        try_free(prop->attributes); // 尝试释放原属性的特性字符串
+        // 将新的特性列表拼成一个特性字符串，赋给属性，并且，该字符串是在堆中分配的
         prop->attributes = copyPropertyAttributeString(attrs, count);
-        return YES;
+        return YES; // 添加成功
     }
-    else {
-        rwlock_writer_t lock(runtimeLock);
+    else { // 不存在同名的属性，则新建一个属性列表存新属性
         
-        assert(cls->isRealized());
+        rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
         
+        assert(cls->isRealized()); // cls 必须是已经 realized 的
+        
+        // 新建一个属性列表
         property_list_t *proplist = (property_list_t *)
             malloc(sizeof(*proplist));
-        proplist->count = 1;
-        proplist->entsizeAndFlags = sizeof(proplist->first);
-        proplist->first.name = strdup(name);
+        proplist->count = 1; // 列表中只有一个元素
+        proplist->entsizeAndFlags = sizeof(proplist->first); // 列表中元素的大小
+        proplist->first.name = strdup(name); // 堆中深拷贝 name
+        // 将新的特性列表拼成一个特性字符串，赋给属性，并且，该字符串是在堆中分配的
         proplist->first.attributes = copyPropertyAttributeString(attrs, count);
         
+        // 新列表添加到 cls 的 properties 属性列表数组中
         cls->data()->properties.attachLists(&proplist, 1);
         
         return YES;
     }
 }
 
+// 添加一个属性到 cls 类中，如果已存在同名的属性，则不进行替换，
+// 返回值是是否添加成功
 BOOL 
 class_addProperty(Class cls, const char *name, 
                   const objc_property_attribute_t *attrs, unsigned int n)
 {
-    return _class_addProperty(cls, name, attrs, n, NO);
+    return _class_addProperty(cls, name, attrs, n, NO/*不替换*/);
 }
 
+// 用新属性，替换 cls 类中的一个属性，若不存在旧属性，就直接添加，
+// 返回值是是否替换成功
 void 
 class_replaceProperty(Class cls, const char *name, 
                       const objc_property_attribute_t *attrs, unsigned int n)
 {
-    _class_addProperty(cls, name, attrs, n, YES);
+    _class_addProperty(cls, name, attrs, n, YES/*替换*/);
 }
 
 
@@ -7230,11 +7310,12 @@ look_up_class(const char *name,
               bool includeUnconnected __attribute__((unused)), 
               bool includeClassHandler __attribute__((unused)))
 {
-    if (!name) return nil;
+    if (!name) return nil; // 类名不能为 nil，否则不能查
 
     Class result;
     bool unrealized;
-    {
+    { // 加函数块是为了能实现自动释放 runtimeLock 锁，下面也一样
+        
         rwlock_reader_t lock(runtimeLock); // 加读锁
         result = getClass(name); // 利用 getClass 函数查找类
         unrealized = result  &&  !result->isRealized(); // 如果找到了类，且类没有被 realize，就标记为 unrealized

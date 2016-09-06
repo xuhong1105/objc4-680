@@ -578,7 +578,7 @@ extern IMP _class_lookupMethodAndLoadCache3(id, SEL, Class);
 #if !OBJC_OLD_DISPATCH_PROTOTYPES
 // 实现代码都在 objc-msg-arm.s 中
 extern void _objc_msgForward_impcache(void); // 进行消息转发的函数
-extern void _objc_ignored_method(void); // 忽略方法的函数
+extern void _objc_ignored_method(void); // 被忽略的方法的对应 IMP
 extern void _objc_msgSend_uncached_impcache(void); // 处理缓存未命中的函数
 #else
 extern id _objc_msgForward_impcache(id, SEL, ...);
