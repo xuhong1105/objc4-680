@@ -2121,10 +2121,13 @@ static ivar_t *getIvar(Class cls, const char *name)
     
     if ((ivars = cls->data()->ro->ivars)) { // 如果有成员变量
         for (auto& ivar : *ivars) { // 就遍历成员变量列表
+            
             if (!ivar.offset) continue;  // anonymous bitfield
 
             // ivar.name may be nil for anonymous bitfields etc.
-            if (ivar.name  &&  0 == strcmp(name, ivar.name)) { // 找到名字为 name 的成员变量，将其返回
+            // 找到名字为 name 的成员变量，将其返回
+            // 前面先判断 ivar.name 是因为存在匿名的成员变量，匿名成员遍历的 name 为 nil
+            if (ivar.name  &&  0 == strcmp(name, ivar.name)) {
                 return &ivar;
             }
         }
@@ -7180,7 +7183,7 @@ class_addIvar(Class cls, const char *name/*变量名*/, size_t size/*变量的�
 #endif
     
     *ivar.offset = offset; // 偏移量赋值，因为它是指针类型的，所以需要用 *
-    ivar.name = name ? strdup(name) : nil; // 在堆中深拷贝 name 字符串
+    ivar.name = name ? strdup(name) : nil; // 在堆中深拷贝 name 字符串，如果是匿名成员变量，就传 nil
     ivar.type = strdup(type); // 在堆中深拷贝 type 字符串
     ivar.alignment_raw = alignment; // 对齐字节数
     ivar.size = (uint32_t)size; // 变量的大小
