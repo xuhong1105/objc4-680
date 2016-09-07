@@ -598,8 +598,8 @@ struct locstamped_category_list_t {
 // class_t->data is class_rw_t, not class_ro_t
 #define RW_REALIZED           (1<<31)  // 类是否已经被 realized
 // class is unresolved future class
-#define RW_FUTURE             (1<<30)  // 类还没有 realized，但是已经 future 了，
-                                       // 就是现在暂时没有 realized，一会儿就 realized
+#define RW_FUTURE             (1<<30)  // future 的类，就是已经分配好内存了，但是里面的信息没有填充
+                                       // 在 realizeClass() 和 readClass() 中，如果同名的类进来，就会用新来的类中的信息将 该 future 类填充，并进行重映射
 // class is initialized
 #define RW_INITIALIZED        (1<<29)  // 类已经被初始化
 // class is initializing
@@ -609,9 +609,12 @@ struct locstamped_category_list_t {
                                        // 即先在堆中分配内存，然后将 ro 拷贝过去，这时的 ro 就是可读可写的
 // class allocated but not yet registered
 #define RW_CONSTRUCTING       (1<<26)  // 类已经被 allocated，但是没有注册，
-                                       // 一般称为 under construction 或者 in construction
+                                       // 一般称为 under construction 或者 in construction 或者 constructing
+                                       // 类是在 objc_initializeClassPair_internal() 中被设为 constructing 状态的，
+                                       // 并在 objc_registerClassPair() 中取消了 constructing 状态，改为 constructed 状态
 // class allocated and registered
-#define RW_CONSTRUCTED        (1<<25)  // 类已经 allocated，并且已经注册
+#define RW_CONSTRUCTED        (1<<25)  // 类已经 allocated，并且已经注册，只在 objc_registerClassPair() 中用到
+                                       // 即注册是在 objc_registerClassPair() 中做的
 // GC:  class has unsafe finalize method
 #define RW_FINALIZE_ON_MAIN_THREAD (1<<24)  // 在主线程结束，与 initialize 对应
 // class +load has been called
@@ -1700,9 +1703,9 @@ struct objc_class : objc_object {
     // 打印本类有关 raw isa 的信息
     void printRequiresRawIsa(bool inherited);
 
-    // 是否可以 indexed alloc （以索引的方式 alloc ?）
+    // 是否可以 indexed alloc，其实就是是否支持 non-pointer isa
     bool canAllocIndexed() {
-        assert(!isFuture());
+        assert(!isFuture()); // 不能是 future 类
         // 如果需要 raw isa ，就不可以 alloc indexed
         return !requiresRawIsa();
     }

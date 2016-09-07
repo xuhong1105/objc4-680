@@ -2367,7 +2367,6 @@ static void reconcileInstanceVariables(Class cls, Class supercls, const class_ro
     prepare_load_methods()
     realizeAllClassesInImage()
 **********************************************************************/
-// realize 指定的 class
 static Class realizeClass(Class cls)
 {
     runtimeLock.assertWriting(); // 看 runtimeLock 是否正确得加了写锁
@@ -2402,9 +2401,10 @@ static Class realizeClass(Class cls)
     ro = (const class_ro_t *)cls->data(); // 因为在 realized 之前，objc_class 中的 class_data_bits_t bits 里
                                           // 本质上存的是 class_ro_t，所以这里只需要转成 class_ro_t 类型就可以了
                                           // 但 future 的类是例外!!!
+    
     if (ro->flags & RO_FUTURE) {
         // 如果 ro 的 flag 里记录了这是一个 future 的类，那么 objc_class 中的 class_data_bits_t bits 里存的是 class_rw_t
-        // rw 数据已经被分配好内存了
+        // rw 数据已经被分配好内存了，现在要做的就是填充信息
         // This was a future class. rw data is already allocated.
         rw = cls->data();  // 取出 rw
         ro = cls->data()->ro; // 取出 ro
@@ -2859,10 +2859,12 @@ unmap_image(const struct mach_header *mh, intptr_t vmaddr_slide)
  返回新类的指针，有可能是：
     - cls
     - nil (cls 有一个 missing weak-linked 的父类)
-    - 其他 (给一个 future 类预留的空间)
- 调用者：_read_images()
+    - 同名的 future 类，该 future 类填充了 cls 类的信息
+ 调用者：_read_images() / objc_readClassPair()
 **********************************************************************/
-Class readClass(Class cls, bool headerIsBundle/*是否是 bundle*/, bool headerIsPreoptimized/*是否被预优化过*/)
+Class readClass(Class cls,
+                bool headerIsBundle/*是否是 bundle*/,
+                bool headerIsPreoptimized/*是否被预优化过，即是否来自 shared cache*/)
 {
     const char *mangledName = cls->mangledName(); // 取得 cls 的重整后的名字
     
@@ -2901,14 +2903,15 @@ Class readClass(Class cls, bool headerIsBundle/*是否是 bundle*/, bool headerI
 
     Class replacing = nil; // 记录被代替的类
     
-    // 将 mangledName 对应的 future 的类从 future_named_class_map 中移除
-    // 如果它不是一个 future 类，则会返回 nil
+    // 尝试将 mangledName 对应的 future 的类从 future_named_class_map 中弹出
+    // 如果返回的 newCls 有值，则 newcls 类是以前开辟的一个同名的 future 类，
+    // 这个 future 类现在得到了兑现，因为有一个同名的新类 cls 进来了，
+    // future 类里的信息会由 cls 中的信息填充（原来 future 类只开辟了内存，里面其实是啥都没的）
+    // 并将 cls 代替
     if (Class newCls = popFutureNamedClass(mangledName)) {
         // This name was previously allocated as a future class.
         // Copy objc_class to future class's struct.
         // Preserve future's rw data block.
-        
-        // 如果 newCls 有值，则 newcls 类是一个 future 类
         
         // 但是 newcls 不能是 swift 类，因为太大了？啥意思？swift类能有多大
         if (newCls->isSwift()) {
@@ -7453,10 +7456,11 @@ static void objc_initializeClassPair_internal(Class superclass, // 父类
 
     // 设置 cls 和 meta 的 rw 中的 flags
     // 二者的 flags 是一样
-    // RW_CONSTRUCTING: 类正在构造(under construction)，还没有注册
-    // RW_COPIED_RO: class_rw_t->ro 是 class_ro_t 堆拷贝过来的，这时的 ro 是可读可写的
-    // RW_REALIZED: 类已经被 realized
-    // RW_REALIZING: 类已经被 realizing，其实已经设置 RW_REALIZED，那么这个 flag 是没啥用的
+    //    RW_CONSTRUCTING: 类正在构造(under construction)，还没有注册；
+    //    RW_COPIED_RO:    class_rw_t->ro 是 class_ro_t 堆拷贝过来的，这时的 ro 是可读可写的；
+    //    RW_REALIZED:     类已经被 realized；
+    //    RW_REALIZING:    类已经被 realizing；
+    // 其中 RW_CONSTRUCTING 和 RW_REALIZING 会在 objc_registerClassPair() 函数中被清除
     cls->data()->flags = RW_CONSTRUCTING | RW_COPIED_RO | RW_REALIZED | RW_REALIZING;
     meta->data()->flags = RW_CONSTRUCTING | RW_COPIED_RO | RW_REALIZED | RW_REALIZING;
     
@@ -7536,10 +7540,12 @@ static void objc_initializeClassPair_internal(Class superclass, // 父类
 * Sanity-check the superclass provided to 
 * objc_allocateClassPair, objc_initializeClassPair, or objc_readClassPair.
 **********************************************************************/
+// 核实父类是否符合要求
+// 调用者：objc_allocateClassPair() / objc_initializeClassPair() / objc_readClassPair()
 bool
-verifySuperclass(Class superclass, bool rootOK)
+verifySuperclass(Class superclass, bool rootOK/*是否可以是根类*/)
 {
-    if (!superclass) {
+    if (!superclass) { // 没有 superclass
         // Superclass does not exist.
         // If subclass may be a root class, this is OK.
         // If subclass must not be a root class, this is bad.
@@ -7547,11 +7553,11 @@ verifySuperclass(Class superclass, bool rootOK)
     }
 
     // Superclass must be realized.
-    if (! superclass->isRealized()) return false;
+    if (! superclass->isRealized()) return false; // superclass 必须是经过 realized 的
 
     // Superclass must not be under construction.
-    if (superclass->data()->flags & RW_CONSTRUCTING) return false;
-
+    if (superclass->data()->flags & RW_CONSTRUCTING) return false; // superclass 不能是 under construction 的
+                                                                   // 即它已经是注册，是能用的
     return true;
 }
 
@@ -7559,17 +7565,21 @@ verifySuperclass(Class superclass, bool rootOK)
 /***********************************************************************
 * objc_initializeClassPair
 **********************************************************************/
+// 初始化一对新的<类-元类>的信息，
+// 调用的是 objc_initializeClassPair_internal() 函数，比它多的是加了写锁，检查了是否已经有同名类存在，并核实父类是否符合要求
 // 调用者：无
 Class objc_initializeClassPair(Class superclass, const char *name, Class cls, Class meta)
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
     // Fail if the class name is in use.
     // Fail if the superclass isn't kosher.
+    // 如果已经有同名类存在，或者父类不符合要求，则失败
     if (getClass(name)  ||  !verifySuperclass(superclass, true/*rootOK*/)) {
         return nil;
     }
 
+    // 调用 objc_initializeClassPair_internal() 做初始化信息工作
     objc_initializeClassPair_internal(superclass, name, cls, meta);
 
     return cls;
@@ -7581,25 +7591,40 @@ Class objc_initializeClassPair(Class superclass, const char *name, Class cls, Cl
 * fixme
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 创建一对新的类和元类
+// superclass 是新类的父类，如果没有父类，则创建的是新的根类
+// name 是新类的名字，会被堆拷贝
+// extraBytes 是额外的字节，通常是 0
+// 返回新类，如果创建失败，就返回 nil，比如类名已经被使用了
+// 提示：I 可以通过 object_getClass(newClass) 取得新建的元类
+//     II 创建一个新类的步骤：
+//         1. 调用 objc_allocateClassPair() 函数创建类-元类对
+//         2. 调用 class_addMethod() / class_addIvar() 等函数 设置类的 attributes
+//         3. 完成构建，就调用 objc_registerClassPair() 函数注册类-元类对，然后这个类就可以使用了
+//    III 实例方法和实例变量被添加到类中，类方法被添加到元类中
+//
 // 调用者：_NSResurrectedObject_initialize()
 Class objc_allocateClassPair(Class superclass, const char *name, 
                              size_t extraBytes)
 {
     Class cls, meta;
 
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
     // Fail if the class name is in use.
     // Fail if the superclass isn't kosher.
+    // 如果已经有同名类存在，或者父类不符合要求，则失败
     if (getClass(name)  ||  !verifySuperclass(superclass, true/*rootOK*/)) {
         return nil;
     }
 
     // Allocate new classes.
+    // 创建 cls 类和 meta 类，为它们开辟内存
     cls  = alloc_class_for_subclass(superclass, extraBytes);
     meta = alloc_class_for_subclass(superclass, extraBytes);
 
     // fixme mangle the name if it looks swift-y?
+    // 初始化这对新的<类-元类>的信息
     objc_initializeClassPair_internal(superclass, name, cls, meta);
 
     return cls;
@@ -7611,10 +7636,15 @@ Class objc_allocateClassPair(Class superclass, const char *name,
 * fixme
 * Locking: acquires runtimeLock
 **********************************************************************/
+// 注册一对新的类和元类，注册后，这个类就可以使用了，
+// 并且类和元类的状态会由 constructing 变为 constructed
+// 参数只有 cls 类，而没有元类是因为元类可以用 cls->ISA() 得到
+// 调用者：_NSResurrectedObject_initialize()
 void objc_registerClassPair(Class cls)
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
+    // 如果 cls 类及其元类已经是 constructed 状态，则表示已经注册过了，不必再注册一次，报警告后直接返回
     if ((cls->data()->flags & RW_CONSTRUCTED)  ||  
         (cls->ISA()->data()->flags & RW_CONSTRUCTED)) 
     {
@@ -7623,6 +7653,8 @@ void objc_registerClassPair(Class cls)
         return;
     }
 
+    // 如果 cls 类及其元类还不是 constructing 状态，则它们不是 objc_allocateClassPair() 创建的，
+    // 报警告后直接返回
     if (!(cls->data()->flags & RW_CONSTRUCTING)  ||  
         !(cls->ISA()->data()->flags & RW_CONSTRUCTING))
     {
@@ -7632,8 +7664,10 @@ void objc_registerClassPair(Class cls)
         return;
     }
 
+    
+    
     // Build ivar layouts
-    if (UseGC) {
+    if (UseGC) { // 如果用的是 GC，我们绝不会用到 GC，所以下面这段代码不看也罢
         Class supercls = cls->superclass;
         class_ro_t *ro_w = (class_ro_t *)cls->data()->ro;
 
@@ -7684,14 +7718,17 @@ void objc_registerClassPair(Class cls)
         }
     }
 
+    
+    
     // Clear "under construction" bit, set "done constructing" bit
+    // 取消 cls 类及其元类的 constructing 和 realizing 状态，改为 constructed 状态
     cls->ISA()->changeInfo(RW_CONSTRUCTED, RW_CONSTRUCTING | RW_REALIZING);
     cls->changeInfo(RW_CONSTRUCTED, RW_CONSTRUCTING | RW_REALIZING);
 
     // Add to named and realized classes
-    addNamedClass(cls, cls->data()->ro->name);
-    addRealizedClass(cls);
-    addRealizedMetaclass(cls->ISA());
+    addNamedClass(cls, cls->data()->ro->name); // 将 cls 类添加到 gdb_objc_realized_classes 表中
+    addRealizedClass(cls); // 将 cls 类添加到 realized_class_hash 哈希表中
+    addRealizedMetaclass(cls->ISA()); // 将 cls 的元类添加到 realized_metaclass_hash 哈希表中
 }
 
 
@@ -7705,28 +7742,37 @@ void objc_registerClassPair(Class cls)
 *
 * Locking: runtimeLock acquired by map_images
 **********************************************************************/
+// 读一对编译器写的<类-元类>，
+// bits 就是编译器写的类，info 是镜像的信息，
+//
 Class objc_readClassPair(Class bits, const struct objc_image_info *info)
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
     // No info bits are significant yet.
     (void)info;
 
     // Fail if the class name is in use.
     // Fail if the superclass isn't kosher.
-    const char *name = bits->mangledName();
-    bool rootOK = bits->data()->flags & RO_ROOT;
+    const char *name = bits->mangledName(); // 取得该类的重整后的名字
+    bool rootOK = bits->data()->flags & RO_ROOT; // 是否可以是根类
+    
+    // 如果已经有同名类存在，或者父类不符合要求，则失败，返回 nil
     if (getClass(name) || !verifySuperclass(bits->superclass, rootOK)){
         return nil;
     }
 
+    // 读取该类，里面会做一些处理，正常情况下是不会重映射的，即没有不存在同名的 future 类，
     Class cls = readClass(bits, false/*bundle*/, false/*shared cache*/);
+    
+    // 如果 cls 类与 bits 不一致，即在 readClass() 发生了重映射，这是不允许的，所以算是致命的错误
     if (cls != bits) {
         // This function isn't allowed to remap anything.
         _objc_fatal("objc_readClassPair for class %s changed %p to %p", 
                     cls->nameForLogging(), bits, cls);
     }
-    realizeClass(cls);
+    
+    realizeClass(cls); // realize cls 类
 
     return cls;
 }
@@ -7743,7 +7789,7 @@ Class objc_readClassPair(Class bits, const struct objc_image_info *info)
 // 异常：不要将这个类从 +load 列表中移除（#疑问：什么意思？？）
 // 必须在 free_class 前被调用，见 _unload_image()
 // 调用者：_unload_image() / objc_disposeClassPair()
-static void detach_class(Class cls, bool isMeta)
+static void detach_class(Class cls, bool isMeta/*是否是元类*/)
 {
     runtimeLock.assertWriting(); // runtimeLock 需要事先加上写锁
 
@@ -7820,11 +7866,13 @@ static void free_class(Class cls)
     try_free(cls); // 最后将 cls 类本身也释放了
 }
 
-
+// 销毁 cls 类以及它的元类
+// 注意 cls 类不能有子类，应该也不能有实例
 void objc_disposeClassPair(Class cls)
 {
-    rwlock_writer_t lock(runtimeLock);
+    rwlock_writer_t lock(runtimeLock); // runtimeLock 加写锁
 
+    // cls 类不是 objc_allocateClassPair() 函数创建的，无法通过 objc_disposeClassPair() 销毁
     if (!(cls->data()->flags & (RW_CONSTRUCTED|RW_CONSTRUCTING))  ||  
         !(cls->ISA()->data()->flags & (RW_CONSTRUCTED|RW_CONSTRUCTING))) 
     {
@@ -7836,6 +7884,7 @@ void objc_disposeClassPair(Class cls)
         return;
     }
 
+    // cls 不能是元类
     if (cls->isMetaClass()) {
         _objc_inform("objc_disposeClassPair: class '%s' is a metaclass, "
                      "not a class!", cls->data()->ro->name);
@@ -7843,6 +7892,7 @@ void objc_disposeClassPair(Class cls)
     }
 
     // Shouldn't have any live subclasses.
+    // cls 类及其元类都不能有子类
     if (cls->data()->firstSubclass) {
         _objc_inform("objc_disposeClassPair: class '%s' still has subclasses, "
                      "including '%s'!", cls->data()->ro->name, 
@@ -7856,10 +7906,10 @@ void objc_disposeClassPair(Class cls)
 
     // don't remove_class_from_loadable_list() 
     // - it's not there and we don't have the lock
-    detach_class(cls->ISA(), YES);
-    detach_class(cls, NO);
-    free_class(cls->ISA());
-    free_class(cls);
+    detach_class(cls->ISA(), YES); // 断开 cls 的元类和其他数据结构的连接
+    detach_class(cls, NO);  // 断开 cls 类和其他数据结构的连接
+    free_class(cls->ISA()); // 释放 cls 的元类
+    free_class(cls);        // 释放 cls 类
 }
 
 
@@ -7873,28 +7923,39 @@ void objc_disposeClassPair(Class cls)
 *   nil, or if C++ constructors fail.
 * Note: class_createInstance() and class_createInstances() preflight this.
 **********************************************************************/
+// 在指定的内存上构造一个 cls 类的实例，bytes 指向了那片内存，
+// 那篇内存的大小至少是 class_getInstanceSize(cls)，并且是对齐好的，已经被清零
+// 成功返回 bytes，否则返回 nil
 id 
 objc_constructInstance(Class cls, void *bytes) 
 {
+    // cls 和 bytes 都不能为 nil
     if (!cls  ||  !bytes) return nil;
 
     id obj = (id)bytes;
 
     // Read class's info bits all at once for performance
-    bool hasCxxCtor = cls->hasCxxCtor();
-    bool hasCxxDtor = cls->hasCxxDtor();
-    bool fast = cls->canAllocIndexed();
+    bool hasCxxCtor = cls->hasCxxCtor(); // 是否有 C++ 构造器
+    bool hasCxxDtor = cls->hasCxxDtor(); // 是否有 C++ 析构器
+    bool fast = cls->canAllocIndexed();  // 是否可以 indexed alloc，这和 non-pointer isa 有关
     
-    if (!UseGC  &&  fast) {
+    if (!UseGC  &&  fast) { // 如果没有使用 GC，且可以 indexed alloc
         obj->initInstanceIsa(cls, hasCxxDtor);
     } else {
         obj->initIsa(cls);
     }
 
-    if (hasCxxCtor) {
+    /*
+     initInstanceIsa() 最终调用 initIsa(cls, true, hasCxxDtor)
+     initIsa() 最终调用 initIsa(cls, false, false)
+     
+     差别主要在第二个参数，就是是否 isa 是否是 indexed 的，即是否是 non-pointer isa
+     */
+    
+    if (hasCxxCtor) { // 如果有 C++ 构造器，就调用 C++ 构造器构造对象
         return object_cxxConstructFromClass(obj, cls);
     } else {
-        return obj;
+        return obj; // 如果没有，就直接返回对象
     }
 }
 

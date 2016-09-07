@@ -464,6 +464,9 @@ void object_cxxDestruct(id obj)
 * return self: construction succeeded
 * return nil:  construction failed because a C++ constructor threw an exception
 **********************************************************************/
+// 递归调用 C++ 构造器，从基类的构造器，一直到 cls 类的构造器，
+// 不检查是否有 C++ 构造器，由调用者负责检查
+// 如果构造成功，就返回 self，失败就返回 nil
 id 
 object_cxxConstructFromClass(id obj, Class cls)
 {
@@ -475,26 +478,39 @@ object_cxxConstructFromClass(id obj, Class cls)
     supercls = cls->superclass;
 
     // Call superclasses' ctors first, if any.
+    // 如果有父类，且父类有 C++ 构造器
     if (supercls  &&  supercls->hasCxxCtor()) {
+        // 就先调用父类的 C++　构造器
         bool ok = object_cxxConstructFromClass(obj, supercls);
+        // 如果构造失败，就返回 nil
         if (!ok) return nil;  // some superclass's ctor failed - give up
     }
 
     // Find this class's ctor, if any.
+    // 寻找 cls 的 C++ 构造器的 IMP
     ctor = (id(*)(id))lookupMethodInClassAndLoadCache(cls, SEL_cxx_construct);
-    if (ctor == (id(*)(id))_objc_msgForward_impcache) return obj;  // no ctor - ok
+    
+    // 如果 ctor 等于 _objc_msgForward_impcache，即没有找到对应的 IMP，
+    // 就是没有 C++ 构造器，就不用往下走了，直接返回对象
+    if (ctor == (id(*)(id))_objc_msgForward_impcache) { // no ctor - ok
+        return obj;
+    }
     
     // Call this class's ctor.
     if (PrintCxxCtors) {
         _objc_inform("CXX: calling C++ constructors for class %s", 
                      cls->nameForLogging());
     }
+    
+    // 这行就是传说中的调用 C++ 的构造器，其实特么就是执行一下构造函数
     if ((*ctor)(obj)) return obj;  // ctor called and succeeded - ok
 
     // This class's ctor was called and failed. 
     // Call superclasses's dtors to clean up.
+    // 上面一行调用构造函数失败，只能调用父类的析构函数，收拾残局了
     if (supercls) object_cxxDestructFromClass(obj, supercls);
-    return nil;
+    
+    return nil; // 构造失败返回 nil
 }
 
 
