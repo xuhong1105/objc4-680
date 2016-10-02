@@ -687,6 +687,8 @@ map_images_nolock(enum dyld_image_states state, uint32_t infoCount,
 
     if (firstTime) {
         sel_init(wantsGC, selrefCount);
+        
+        // 初始化自动释放池、初始化 side table
         arr_init();
     }
 

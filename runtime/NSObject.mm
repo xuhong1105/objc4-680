@@ -650,6 +650,9 @@ objc_moveWeak(id *dst, id *src)
      and deleted as necessary. 
    Thread-local storage points to the hot page, where newly autoreleased 
      objects are stored. 
+ 
+   Thread-local storage （TLS）指向 hotpage，新的 autorelease 对象被添加进 hotpage 中。
+ 
 **********************************************************************/
 
 BREAKPOINT_FUNCTION(void objc_autoreleaseNoPool(id obj));
@@ -700,6 +703,10 @@ struct magic_t {
 // 参考博客：http://www.cocoachina.com/ios/20141031/10107.html
 //         http://blog.leichunfeng.com/blog/2015/05/31/objective-c-autorelease-pool-implementation-principle/
 
+// 有一点需要明确，线程和 page 链表的确是一一对应的，但 TLS 里只存了 hotPage，即链表最末的 page ，应该是为了性能考虑，
+// O(n) 和 O(1) 差距还是很大的。一个线程需要存新的 autorelease 对象时，会先从 TLS 里取出 hotPage，如果没有 hotPage，就会新建一个 page，即新建了这个 page 链表，
+// 因为线程和 page 链表一一对应，所以压根儿不需要加锁，因为其他线程是不会操作当前线程的 page 链表的
+
 // Set this to 1 to mprotect() autorelease pool contents
 #define PROTECT_AUTORELEASEPOOL 0
 
@@ -729,8 +736,8 @@ class AutoreleasePoolPage
     // 指向最新添加的 autoreleased 对象的下一个位置，初始化时指向 begin()
     id *next;
     
-    // AutoreleasePool是按线程一一对应的（结构中的thread指针指向当前线程）
-    pthread_t const thread; // 当前线程
+    // AutoreleasePoolPage 和线程是一一对应的
+    pthread_t const thread; // 所属线程
     
     // AutoreleasePool并没有单独的结构，而是由若干个AutoreleasePoolPage以双向链表的形式组合而成（分别对应结构中的parent指针和child指针）
     AutoreleasePoolPage * const parent; // 父page
@@ -814,7 +821,7 @@ class AutoreleasePoolPage
         assert(!child);
     }
 
-    // die 参数应该是决定 要不要让程序直接挂掉
+    // die 参数应该是决定 要不要让进程直接挂掉
     void busted(bool die = true) 
     {
         magic_t right; // 正确的magic
@@ -831,8 +838,13 @@ class AutoreleasePoolPage
              this->thread, pthread_self());
     }
 
-    void check(bool die = true) 
+    // 检查 magic 是否完整，以及
+    // 参数指定是否让进程直接挂掉，构造函数和析构函数里都是默认值，只有在 print() 里是 false
+    // 调用者：AutoreleasePoolPage::AutoreleasePoolPage() / print() / AutoreleasePoolPage::~AutoreleasePoolPage()
+    void check(bool die = true)
     {
+        // 如果 magic.check() 返回 false，或者 pthread_equal 返回 false，都会造成 busted
+        // 即 magic 被冲毁，或者 page 里存的线程并不是当前线程
         if (!magic.check() || !pthread_equal(thread, pthread_self())) {
             busted(die);
         }
@@ -1012,10 +1024,11 @@ class AutoreleasePoolPage
         return result;
     }
 
-    // 取得 hotPage
+    // 取得 hotPage，TLS 存的是 hotPage，而不是链表的头节点，应该是为了性能考虑
     static inline AutoreleasePoolPage *hotPage() 
     {
-        // tls_get_direct 估计是用来绑定key和对象
+        // 用 tls_get_direct 取出 TLS 里存的当前线程的 hotPage，
+        // 这个很关键，即从这可以看出，每个线程拥有独立的 page 链表
         AutoreleasePoolPage *result = (AutoreleasePoolPage *)
             tls_get_direct(key);
         if (result) result->fastcheck();
@@ -1168,7 +1181,7 @@ public: // 前面都是私有成员和方法，下面开始是公开的方法
     {
         id *dest;
         if (DebugPoolAllocation) {
-            // 如果开启了 DebugPoolAllocation ，则每个 pool 都放入一个新建的 pool 中
+            // 如果开启了 DebugPoolAllocation ，则每个 pool 都放入一个新建的 page 中
             // Each autorelease pool starts on a new pool page.
             dest = autoreleaseNewPage(POOL_SENTINEL);
         } else {
@@ -1235,7 +1248,7 @@ public: // 前面都是私有成员和方法，下面开始是公开的方法
         }
     }
 
-    // 初始化 AutoreleasePoolPage , 只在 arr_init 函数中调用了一次
+    // 初始化 AutoreleasePoolPage , 只在 arr_init() 函数中调用了一次
     static void init()
     {
         // 函数原型：
@@ -1246,6 +1259,8 @@ public: // 前面都是私有成员和方法，下面开始是公开的方法
         assert(r == 0);
     }
 
+    // 打印当前 page 的信息，
+    // 调用者：printAll()
     void print() 
     {
         _objc_inform("[%p]  ................  PAGE %s %s %s",
@@ -1253,7 +1268,9 @@ public: // 前面都是私有成员和方法，下面开始是公开的方法
                      full() ? "(full)" : "" /* 满了没 */,
                      this == hotPage() ? "(hot)" : "" /* 当前 page 是否是 hotPage */,
                      this == coldPage() ? "(cold)" : "") /* 当前 page 是否是 coldPage */;
-        check(false);
+        
+        check(false); // 进行检查，但参数是 false，即有错也不直接挂掉
+        
         // 打印出 page 中每个对象的信息
         for (id *p = begin(); p < next; p++) {
             if (*p == POOL_SENTINEL) {

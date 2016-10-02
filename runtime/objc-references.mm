@@ -310,6 +310,8 @@ void _object_set_associative_reference(id object, void *key, id value, uintptr_t
     if (old_association.hasValue()) ReleaseValue()(old_association);
 }
 
+// 移除 object 的关联对象
+// 调用者：objc_destructInstance() / objc_removeAssociatedObjects()
 void _object_remove_assocations(id object) {
     vector< ObjcAssociation,ObjcAllocator<ObjcAssociation> > elements;
     {
